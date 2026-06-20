@@ -68,8 +68,8 @@ runButton.addEventListener("click", async () => {
     const rows: Array<Record<string, unknown>> = [];
 
     try {
-      await sqlite3.exec(db, "PRAGMA journal_mode=DELETE;");
-      await sqlite3.exec(db, "PRAGMA synchronous=FULL;");
+      await sqlite3.exec(db, "PRAGMA journal_mode=OFF;");
+      await sqlite3.exec(db, "PRAGMA synchronous=OFF;");
       await sqlite3.exec(db, `
         CREATE TABLE IF NOT EXISTS demo_events (
           id INTEGER PRIMARY KEY,
