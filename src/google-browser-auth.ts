@@ -5,11 +5,45 @@ export const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 export const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 export const DEFAULT_GOOGLE_SCOPES = `${SHEETS_SCOPE} ${DRIVE_FILE_SCOPE}`;
 
-declare const gapi: any;
-declare const google: any;
+type GoogleToken = {
+  access_token?: string;
+};
+
+type GoogleTokenResponse = {
+  error?: string;
+};
+
+type GoogleTokenClient = {
+  callback: (response: GoogleTokenResponse) => void;
+  requestAccessToken(options: { prompt: "consent" | "" }): void;
+};
+
+type GoogleOAuthApi = {
+  accounts: {
+    oauth2: {
+      initTokenClient(config: {
+        client_id: string;
+        scope: string;
+        callback: (response: GoogleTokenResponse) => void;
+      }): GoogleTokenClient;
+      revoke(token: string): void;
+    };
+  };
+};
+
+declare const gapi: {
+  load(feature: "client", callback: () => void): void;
+  client: {
+    init(config: { apiKey?: string; discoveryDocs: string[] }): Promise<void>;
+    getToken?(): GoogleToken | undefined;
+    setToken(token: GoogleToken | "" | null): void;
+  };
+};
+
+declare const google: GoogleOAuthApi;
 
 export class GoogleBrowserAuth {
-  private tokenClient: any | undefined;
+  private tokenClient: GoogleTokenClient | undefined;
 
   constructor(private readonly config: GoogleBrowserSheetsConfig) {}
 
@@ -47,12 +81,12 @@ export class GoogleBrowserAuth {
     if (existingToken?.access_token && prompt !== "consent") return;
 
     await new Promise<void>((resolve, reject) => {
-      this.tokenClient.callback = (response: any) => {
-        if (response?.error) reject(response);
+      this.tokenClient!.callback = (response) => {
+        if (response.error) reject(response);
         else resolve();
       };
 
-      this.tokenClient.requestAccessToken({
+      this.tokenClient!.requestAccessToken({
         prompt: prompt || (existingToken ? "" : "consent"),
       });
     });

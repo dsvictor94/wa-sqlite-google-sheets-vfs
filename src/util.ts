@@ -7,6 +7,10 @@ export function quoteSheetName(name: string): string {
 }
 
 export function columnName(index1: number): string {
+  if (!Number.isInteger(index1) || index1 < 1) {
+    throw new RangeError(`column index must be a positive integer, got ${index1}`);
+  }
+
   let n = index1;
   let name = "";
 
@@ -51,9 +55,7 @@ export function base64ToBytes(base64: string): Uint8Array {
   return out;
 }
 
-export function normalizeBlock(block: Uint8Array, blockBytes: number): Uint8Array {
-  if (block.byteLength === blockBytes) return block.slice();
-
+export function copyFixedBlock(block: Uint8Array, blockBytes: number): Uint8Array {
   const out = new Uint8Array(blockBytes);
   out.set(block.subarray(0, blockBytes));
   return out;
@@ -61,6 +63,7 @@ export function normalizeBlock(block: Uint8Array, blockBytes: number): Uint8Arra
 
 export function blocksTouched(offset: number, length: number, blockBytes: number): number[] {
   if (length <= 0) return [];
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new RangeError(`invalid offset ${offset}`);
 
   const first = Math.floor(offset / blockBytes);
   const last = Math.floor((offset + length - 1) / blockBytes);
@@ -68,10 +71,6 @@ export function blocksTouched(offset: number, length: number, blockBytes: number
 
   for (let i = first; i <= last; i++) indexes.push(i);
   return indexes;
-}
-
-export function unique(values: number[]): number[] {
-  return [...new Set(values)];
 }
 
 export function parseAppendedRow(updatedRange: string | undefined): number {
