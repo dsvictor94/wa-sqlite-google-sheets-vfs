@@ -12,7 +12,17 @@ The Pages workflow builds on pull requests and deploys on pushes to `main`.
 
 ## Package status
 
-`wa-sqlite` is not published to npm, so the demo CI intentionally does not install it from npm yet. The next step is to choose how this repo should consume it: vendored source, git submodule, or a GitHub dependency/pinned archive.
+`wa-sqlite` is not published to npm, so this repo installs it directly from GitHub:
+
+```json
+{
+  "dependencies": {
+    "wa-sqlite": "github:rhashimoto/wa-sqlite#master"
+  }
+}
+```
+
+The upstream package includes both the built `dist/*` artifacts and the VFS helper files under `src/`, which this implementation imports.
 
 ## Features
 
