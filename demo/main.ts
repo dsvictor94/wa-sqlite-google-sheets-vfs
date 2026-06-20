@@ -68,15 +68,21 @@ runButton.addEventListener("click", async () => {
     const rows: Array<Record<string, unknown>> = [];
 
     try {
+      await sqlite3.exec(db, "PRAGMA journal_mode=DELETE;");
+      await sqlite3.exec(db, "PRAGMA synchronous=FULL;");
       await sqlite3.exec(db, `
-        PRAGMA journal_mode=DELETE;
-        PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS demo_events (
           id INTEGER PRIMARY KEY,
           message TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
       `);
+
+      const createdTables: string[] = [];
+      await sqlite3.exec(db, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'demo_events';", (row: unknown[]) => {
+        if (row[0]) createdTables.push(String(row[0]));
+      });
+      if (!createdTables.includes("demo_events")) throw new Error("demo_events table was not created");
       log("Table ready", "ok");
 
       const message = `Hello from Google Sheets VFS at ${new Date().toISOString()}`;
