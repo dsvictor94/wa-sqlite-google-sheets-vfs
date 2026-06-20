@@ -52,6 +52,7 @@ export class GoogleSheetsLease {
   private readonly renewBeforeExpiryMs: number;
   private heldLease: HeldLease | null = null;
   private releaseTimer: number | undefined;
+  private useGeneration = 0;
 
   constructor(
     private readonly client: GoogleSdkSheetsClient,
@@ -71,6 +72,7 @@ export class GoogleSheetsLease {
 
   async acquire(): Promise<boolean> {
     this.cancelScheduledRelease();
+    this.useGeneration++;
     if (this.isHeld) return true;
 
     const deadline = Date.now() + this.lockTimeoutMs;
@@ -107,26 +109,32 @@ export class GoogleSheetsLease {
       return;
     }
 
+    const scheduledGeneration = this.useGeneration;
     this.releaseTimer = globalThis.setTimeout(() => {
       this.releaseTimer = undefined;
-      void this.release().catch(() => undefined);
+      void this.releaseForGeneration(scheduledGeneration).catch(() => undefined);
     }, this.releaseDelayMs);
   }
 
   async release(): Promise<void> {
     this.cancelScheduledRelease();
+    await this.releaseForGeneration(this.useGeneration);
+  }
 
+  private async releaseForGeneration(generation: number): Promise<void> {
     const held = this.heldLease;
-    if (held === null) return;
+    if (held === null || generation !== this.useGeneration) return;
 
     try {
       const observed = await this.readLockCell();
+      if (generation !== this.useGeneration) return;
+
       if (this.isObservedLeaseHeldByThisOwner(observed.state, held.token)) {
         const next = unlockedState(this.options.databaseId, observed.state.revision + 1);
         await this.compareAndSwap(observed.raw, serializeLockState(next));
       }
     } finally {
-      this.heldLease = null;
+      if (generation === this.useGeneration) this.heldLease = null;
     }
   }
 
@@ -211,9 +219,6 @@ function parseLockState(raw: string, databaseId: string): LockCellState {
       return parsed as LockCellState;
     }
   } catch {
-    // Legacy append-log rows store the database id in A2. Treat unknown cell
-    // contents as an expired, unlocked state and replace them with the new
-    // single-cell format through the same compare-and-swap path.
   }
 
   return unlockedState(databaseId, 0);
