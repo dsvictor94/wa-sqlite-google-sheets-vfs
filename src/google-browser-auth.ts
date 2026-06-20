@@ -2,6 +2,8 @@ import type { GoogleBrowserSheetsConfig } from "./types.js";
 
 export const SHEETS_DISCOVERY_DOC = "https://sheets.googleapis.com/$discovery/rest?version=v4";
 export const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+export const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+export const DEFAULT_GOOGLE_SCOPES = `${SHEETS_SCOPE} ${DRIVE_FILE_SCOPE}`;
 
 declare const gapi: any;
 declare const google: any;
@@ -33,8 +35,8 @@ export class GoogleBrowserAuth {
 
     this.tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: this.config.clientId,
-      scope: this.config.scopes ?? SHEETS_SCOPE,
-      callback: "",
+      scope: this.config.scopes ?? DEFAULT_GOOGLE_SCOPES,
+      callback: () => undefined,
     });
   }
 
