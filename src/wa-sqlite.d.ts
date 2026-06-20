@@ -18,6 +18,9 @@ declare module "wa-sqlite/src/VFS.js" {
   export const SQLITE_IOERR_LOCK: number;
   export const SQLITE_IOERR_UNLOCK: number;
   export const SQLITE_IOERR_SHORT_READ: number;
+  export const SQLITE_IOERR_ACCESS: number;
+  export const SQLITE_IOERR_DELETE: number;
+  export const SQLITE_IOERR_CHECKRESERVEDLOCK: number;
   export const SQLITE_OPEN_CREATE: number;
   export const SQLITE_OPEN_MAIN_DB: number;
   export const SQLITE_OPEN_MAIN_JOURNAL: number;
