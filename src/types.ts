@@ -22,9 +22,17 @@ export type CreatedSpreadsheet = {
   spreadsheetUrl: string;
 };
 
+export type SheetCellValue = string | number | boolean | null;
+export type SheetRow = SheetCellValue[];
+
 export type ValueRange = {
   range?: string;
   values?: unknown[][];
+};
+
+export type SheetValueUpdate = {
+  range: string;
+  values: SheetRow[];
 };
 
 export type AppendResponse = {
