@@ -6,4 +6,10 @@ export async function ensureGoogleSheetsVfsTabs(spreadsheetId: string): Promise<
     { title: "__sqlite_lock", rows: 1000, cols: 8 },
     { title: "__sqlite_blocks", rows: 4102, cols: 258 },
   ]);
+  await client.batchUpdate([
+    {
+      range: "'__sqlite_lock'!A1:H1",
+      values: [["databaseId", "ownerId", "token", "createdAtMs", "leaseUntilMs", "releasedAtMs", "type", "note"]],
+    },
+  ]);
 }
