@@ -59,6 +59,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       lockSheetName: options.lockSheetName,
       leaseMs: options.leaseMs,
       lockTimeoutMs: options.lockTimeoutMs,
+      lockReleaseDelayMs: options.lockReleaseDelayMs,
     });
   }
 
@@ -182,7 +183,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     return this.withError(VFS.SQLITE_IOERR_UNLOCK, async () => {
       if (lockType === SQLITE_LOCK_NONE) {
         for (const file of this.files.values()) await this.flush(file);
-        await this.lease.release();
+        await this.lease.releaseSoon();
       }
 
       return VFS.SQLITE_OK;

@@ -11,6 +11,7 @@ import type { AppendResponse, CreatedSpreadsheet, SheetValueUpdate, ValueRange }
 type GoogleApiResponse<T> = { result: T };
 
 type GoogleSheetProperties = {
+  sheetId?: number;
   title?: string;
   gridProperties?: {
     rowCount?: number;
@@ -31,6 +32,42 @@ type SpreadsheetGetResult = {
   sheets?: GoogleSheet[];
 };
 
+type GridRange = {
+  sheetId: number;
+  startRowIndex: number;
+  endRowIndex: number;
+  startColumnIndex: number;
+  endColumnIndex: number;
+};
+
+type FindReplaceRequest = {
+  find: string;
+  replacement: string;
+  matchCase: boolean;
+  matchEntireCell: boolean;
+  searchByRegex: boolean;
+  includeFormulas?: boolean;
+  range: GridRange;
+};
+
+type SpreadsheetRequest =
+  | { addSheet: { properties: GoogleSheetProperties } }
+  | { findReplace: FindReplaceRequest };
+
+type FindReplaceResponse = {
+  valuesChanged?: number;
+  formulasChanged?: number;
+  rowsChanged?: number;
+  sheetsChanged?: number;
+  occurrencesChanged?: number;
+};
+
+export type SpreadsheetBatchUpdateResult = {
+  replies?: Array<{
+    findReplace?: FindReplaceResponse;
+  }>;
+};
+
 type GoogleSheetsApi = {
   spreadsheets: {
     create(request: {
@@ -45,8 +82,8 @@ type GoogleSheetsApi = {
     }): Promise<GoogleApiResponse<SpreadsheetGetResult>>;
     batchUpdate(request: {
       spreadsheetId: string;
-      resource: { requests: unknown[] };
-    }): Promise<GoogleApiResponse<unknown>>;
+      resource: { requests: SpreadsheetRequest[] };
+    }): Promise<GoogleApiResponse<SpreadsheetBatchUpdateResult>>;
     values: {
       batchGet(request: {
         spreadsheetId: string;
@@ -94,16 +131,20 @@ export async function createGoogleSheetsVfsSpreadsheet(title = `wa-sqlite VFS de
 }
 
 export class GoogleSdkSheetsClient {
+  private readonly sheetIdsByTitle = new Map<string, number>();
+
   constructor(private readonly spreadsheetId: string) {}
 
   async ensureSheetTabs(tabs: Array<{ title: string; rows: number; cols: number }>): Promise<void> {
-    const spreadsheet = await gapi.client.sheets.spreadsheets.get({
-      spreadsheetId: this.spreadsheetId,
-      fields: "sheets.properties.title",
-    });
+    const spreadsheet = await this.getSpreadsheetSheets("sheets.properties(sheetId,title)");
     const existing = new Set(
-      (spreadsheet.result.sheets ?? [])
-        .map((sheet) => sheet.properties?.title)
+      (spreadsheet.sheets ?? [])
+        .map((sheet) => {
+          const title = sheet.properties?.title;
+          const sheetId = sheet.properties?.sheetId;
+          if (title !== undefined && sheetId !== undefined) this.sheetIdsByTitle.set(title, sheetId);
+          return title;
+        })
         .filter((title): title is string => Boolean(title)),
     );
     const requests = tabs
@@ -118,11 +159,36 @@ export class GoogleSdkSheetsClient {
       }));
 
     if (requests.length) {
-      await gapi.client.sheets.spreadsheets.batchUpdate({
-        spreadsheetId: this.spreadsheetId,
-        resource: { requests },
-      });
+      await this.spreadsheetBatchUpdate(requests);
+      this.sheetIdsByTitle.clear();
     }
+  }
+
+  async getSheetId(title: string): Promise<number> {
+    const cached = this.sheetIdsByTitle.get(title);
+    if (cached !== undefined) return cached;
+
+    const spreadsheet = await this.getSpreadsheetSheets("sheets.properties(sheetId,title)");
+    for (const sheet of spreadsheet.sheets ?? []) {
+      const sheetTitle = sheet.properties?.title;
+      const sheetId = sheet.properties?.sheetId;
+      if (sheetTitle !== undefined && sheetId !== undefined) this.sheetIdsByTitle.set(sheetTitle, sheetId);
+    }
+
+    const sheetId = this.sheetIdsByTitle.get(title);
+    if (sheetId === undefined) throw new Error(`Google Sheet tab not found: ${title}`);
+    return sheetId;
+  }
+
+  async spreadsheetBatchUpdate(requests: SpreadsheetRequest[]): Promise<SpreadsheetBatchUpdateResult> {
+    if (!requests.length) return {};
+
+    const response = await gapi.client.sheets.spreadsheets.batchUpdate({
+      spreadsheetId: this.spreadsheetId,
+      resource: { requests },
+    });
+
+    return response.result;
   }
 
   async batchGet(ranges: string[]): Promise<ValueRange[]> {
@@ -157,5 +223,13 @@ export class GoogleSdkSheetsClient {
     });
 
     return response.result;
+  }
+
+  private async getSpreadsheetSheets(fields: string): Promise<SpreadsheetGetResult> {
+    const spreadsheet = await gapi.client.sheets.spreadsheets.get({
+      spreadsheetId: this.spreadsheetId,
+      fields,
+    });
+    return spreadsheet.result;
   }
 }

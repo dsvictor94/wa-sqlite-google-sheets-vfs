@@ -9,6 +9,7 @@ export type GoogleSheetsVFSOptions = {
   cacheBlocks?: number;
   leaseMs?: number;
   lockTimeoutMs?: number;
+  lockReleaseDelayMs?: number;
 };
 
 export type GoogleBrowserSheetsConfig = {
