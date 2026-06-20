@@ -51,7 +51,7 @@ export class GoogleSheetsLease {
   private readonly releaseDelayMs: number;
   private readonly renewBeforeExpiryMs: number;
   private heldLease: HeldLease | null = null;
-  private releaseTimer: number | undefined;
+  private releaseTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private useGeneration = 0;
 
   constructor(
