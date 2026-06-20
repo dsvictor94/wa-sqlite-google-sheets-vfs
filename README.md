@@ -4,6 +4,12 @@ SQLite storage on Google Sheets, powered by a custom wa-sqlite VFS.
 
 This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google JavaScript SDK and Google Identity Services, then stores SQLite file data as base64-encoded 1024-byte blocks in a Google Sheets tab.
 
+## Demo
+
+This repo is also a GitHub Pages demo app. The first demo is intentionally tiny: a Vite-built page that renders the word `yellow` in yellow.
+
+The Pages workflow builds on pull requests and deploys on pushes to `main`.
+
 ## Features
 
 - Browser-only Google auth helper.
