@@ -1,7 +1,7 @@
 import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite-async.mjs";
 import * as SQLite from "wa-sqlite";
 import wasmUrl from "wa-sqlite/dist/wa-sqlite-async.wasm?url";
-import { GoogleBrowserAuth, GoogleSheetsSQLiteVFS, createGoogleSheetsVfsSpreadsheet, ensureGoogleSheetsVfsTabs } from "../lib/index.js";
+import { GoogleBrowserAuth, GoogleSheetsSQLiteVFS, createGoogleSheetsVfsSpreadsheet, ensureGoogleSheetsVfsTabs } from "../dist/index.js";
 
 type LogLevel = "info" | "ok" | "error";
 
