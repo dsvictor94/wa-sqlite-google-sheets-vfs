@@ -5,9 +5,7 @@ import { GoogleBrowserAuth, GoogleSheetsSQLiteVFS, createGoogleSheetsVfsSpreadsh
 
 type LogLevel = "info" | "ok" | "error";
 
-const STORAGE_KEY = "wa-sqlite-google-sheets-vfs-demo-config";
-const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
-const saved = readSavedConfig();
+const GOOGLE_CLIENT_ID = "429619695141-pamk25d0kjf42pb09trdao4ostc3132o.apps.googleusercontent.com";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing #app element");
@@ -16,20 +14,13 @@ app.innerHTML = `
   <section class="hero">
     <p class="eyebrow">wa-sqlite + Google Sheets VFS</p>
     <h1>SQLite backed by your Google spreadsheet.</h1>
-    <p class="lede">Authorize Google Sheets, create a fresh spreadsheet, run an INSERT, then SELECT the row back through the VFS.</p>
+    <p class="lede">Connect with Google, create a fresh spreadsheet in your Drive, run an INSERT, then SELECT the row back through the VFS.</p>
   </section>
 
-  <form id="config" class="card">
-    <label>
-      Google API key
-      <input id="apiKey" name="apiKey" autocomplete="off" required value="${escapeAttr(env.VITE_GOOGLE_API_KEY ?? saved.apiKey ?? "")}" />
-    </label>
-    <label>
-      OAuth Client ID
-      <input id="clientId" name="clientId" autocomplete="off" required value="${escapeAttr(env.VITE_GOOGLE_CLIENT_ID ?? saved.clientId ?? "")}" />
-    </label>
-    <button id="run" type="submit">Create spreadsheet and run SQLite smoke test</button>
-  </form>
+  <section class="card">
+    <p>This demo uses the configured OAuth Client ID and requests access only when you click the button.</p>
+    <button id="run" type="button">Connect Google Drive and run SQLite smoke test</button>
+  </section>
 
   <section class="card">
     <h2>Status</h2>
@@ -39,30 +30,23 @@ app.innerHTML = `
   <section id="result" class="card result" hidden></section>
 `;
 
-const form = document.querySelector<HTMLFormElement>("#config")!;
 const runButton = document.querySelector<HTMLButtonElement>("#run")!;
 const logList = document.querySelector<HTMLOListElement>("#log")!;
 const result = document.querySelector<HTMLElement>("#result")!;
 
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
+runButton.addEventListener("click", async () => {
   runButton.disabled = true;
   logList.innerHTML = "";
   result.hidden = true;
 
   try {
-    const formData = new FormData(form);
-    const apiKey = String(formData.get("apiKey") ?? "").trim();
-    const clientId = String(formData.get("clientId") ?? "").trim();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ apiKey, clientId }));
-
-    log("Loading Google SDK and requesting Sheets access", "info");
-    const auth = new GoogleBrowserAuth({ apiKey, clientId });
+    log("Loading Google SDK and requesting Sheets/Drive access", "info");
+    const auth = new GoogleBrowserAuth({ clientId: GOOGLE_CLIENT_ID });
     await auth.init();
     await auth.authorize("consent");
-    log("Google Sheets access granted", "ok");
+    log("Google access granted", "ok");
 
-    log("Creating a new spreadsheet", "info");
+    log("Creating a new spreadsheet in the signed-in user's Drive", "info");
     const spreadsheet = await createGoogleSheetsVfsSpreadsheet();
     await ensureGoogleSheetsVfsTabs(spreadsheet.spreadsheetId);
     log(`Spreadsheet created: ${spreadsheet.spreadsheetId}`, "ok");
@@ -130,14 +114,6 @@ function renderResult(spreadsheetUrl: string, rows: Array<Record<string, unknown
     <p><a href="${escapeAttr(spreadsheetUrl)}" target="_blank" rel="noreferrer">Open the created spreadsheet</a></p>
     <pre>${escapeHtml(JSON.stringify(rows, null, 2))}</pre>
   `;
-}
-
-function readSavedConfig(): { apiKey?: string; clientId?: string } {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
-  } catch {
-    return {};
-  }
 }
 
 function sqlString(value: string): string {
