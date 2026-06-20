@@ -66,16 +66,12 @@ runButton.addEventListener("click", async () => {
     log("Opening SQLite database through the VFS", "info");
     const db = await sqlite3.open_v2("/demo.db", SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE, "google-sheets");
     const rows: Array<Record<string, unknown>> = [];
-    let transactionOpen = false;
 
     try {
-      log("Setting journal_mode=OFF", "info");
-      await sqlite3.exec(db, "PRAGMA journal_mode=OFF;");
-      log("Setting synchronous=OFF", "info");
-      await sqlite3.exec(db, "PRAGMA synchronous=OFF;");
-      log("Beginning exclusive transaction", "info");
-      await sqlite3.exec(db, "BEGIN EXCLUSIVE;");
-      transactionOpen = true;
+      log("Setting journal_mode=DELETE", "info");
+      await sqlite3.exec(db, "PRAGMA journal_mode=DELETE;");
+      log("Setting synchronous=FULL", "info");
+      await sqlite3.exec(db, "PRAGMA synchronous=FULL;");
 
       log("Creating demo_events table", "info");
       await sqlite3.exec(db, `
@@ -103,14 +99,7 @@ runButton.addEventListener("click", async () => {
         rows.push(Object.fromEntries(columns.map((column, index) => [column, row[index]])));
       });
       log("Selected row back from SQLite", "ok");
-
-      log("Committing transaction", "info");
-      await sqlite3.exec(db, "COMMIT;");
-      transactionOpen = false;
     } finally {
-      if (transactionOpen) {
-        try { await sqlite3.exec(db, "ROLLBACK;"); } catch { /* ignore rollback failures in demo */ }
-      }
       await sqlite3.close(db);
     }
 
