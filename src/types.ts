@@ -17,6 +17,11 @@ export type GoogleBrowserSheetsConfig = {
   scopes?: string;
 };
 
+export type CreatedSpreadsheet = {
+  spreadsheetId: string;
+  spreadsheetUrl: string;
+};
+
 export type ValueRange = {
   range?: string;
   values?: unknown[][];
