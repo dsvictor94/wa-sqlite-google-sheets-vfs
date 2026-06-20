@@ -93,7 +93,9 @@ runButton.addEventListener("click", async () => {
 
     renderResult(spreadsheet.spreadsheetUrl, rows);
   } catch (error) {
-    log(error instanceof Error ? error.message : String(error), "error");
+    const message = formatError(error);
+    log(message, "error");
+    renderError(message);
     console.error(error);
   } finally {
     runButton.disabled = false;
@@ -114,6 +116,34 @@ function renderResult(spreadsheetUrl: string, rows: Array<Record<string, unknown
     <p><a href="${escapeAttr(spreadsheetUrl)}" target="_blank" rel="noreferrer">Open the created spreadsheet</a></p>
     <pre>${escapeHtml(JSON.stringify(rows, null, 2))}</pre>
   `;
+}
+
+function renderError(message: string): void {
+  result.hidden = false;
+  result.innerHTML = `
+    <h2>Error details</h2>
+    <pre>${escapeHtml(message)}</pre>
+  `;
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.stack ?? error.message;
+  if (typeof error === "string") return error;
+
+  const maybeGoogleError = error as { status?: number; result?: { error?: { message?: string; status?: string; code?: number } }; body?: string };
+  const apiError = maybeGoogleError.result?.error;
+  if (apiError?.message) {
+    return [
+      `Google API error${apiError.code ? ` ${apiError.code}` : ""}${apiError.status ? ` (${apiError.status})` : ""}: ${apiError.message}`,
+      maybeGoogleError.body,
+    ].filter(Boolean).join("\n\n");
+  }
+
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
 }
 
 function sqlString(value: string): string {
