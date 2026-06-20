@@ -5,24 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>wa-sqlite Google Sheets VFS</title>
     <style>
-      body {
-        min-height: 100vh;
-        margin: 0;
-        display: grid;
-        place-items: center;
-        background: #111827;
-        font-family: system-ui, sans-serif;
-      }
-
-      h1 {
-        margin: 0;
-        color: #facc15;
-        font-size: clamp(4rem, 18vw, 14rem);
-        letter-spacing: -0.08em;
-      }
+      :root { color-scheme: dark; }
+      body { margin: 0; min-height: 100vh; background: #0f172a; color: #e5e7eb; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      #app { width: min(960px, calc(100% - 32px)); margin: 0 auto; padding: 48px 0; }
+      .hero { margin-bottom: 24px; }
+      .eyebrow { color: #facc15; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; font-size: .78rem; }
+      h1 { margin: 0; max-width: 780px; font-size: clamp(2.4rem, 8vw, 5.5rem); line-height: .95; letter-spacing: -.06em; }
+      .lede { max-width: 720px; color: #cbd5e1; font-size: 1.15rem; line-height: 1.6; }
+      .card { background: rgba(15, 23, 42, .8); border: 1px solid rgba(148, 163, 184, .25); border-radius: 20px; padding: 22px; margin: 16px 0; box-shadow: 0 20px 80px rgba(0, 0, 0, .24); }
+      label { display: grid; gap: 8px; margin: 0 0 16px; color: #cbd5e1; font-weight: 600; }
+      input { width: 100%; box-sizing: border-box; border: 1px solid rgba(148, 163, 184, .35); border-radius: 12px; background: #020617; color: #f8fafc; padding: 12px 14px; font: inherit; }
+      button { border: 0; border-radius: 999px; background: #facc15; color: #111827; font-weight: 800; padding: 13px 18px; cursor: pointer; }
+      button:disabled { cursor: wait; opacity: .6; }
+      a { color: #fde047; }
+      .log { margin: 0; padding-left: 24px; line-height: 1.8; }
+      .log .ok { color: #86efac; }
+      .log .error { color: #fca5a5; }
+      pre { overflow: auto; background: #020617; border-radius: 14px; padding: 16px; }
     </style>
   </head>
   <body>
-    <h1>yellow</h1>
+    <main id="app"></main>
+    <script type="module" src="/demo/main.ts"></script>
   </body>
 </html>
