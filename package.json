@@ -21,6 +21,9 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "wa-sqlite": "github:rhashimoto/wa-sqlite#master"
+  },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.0",
     "typescript": "^5.5.0",
