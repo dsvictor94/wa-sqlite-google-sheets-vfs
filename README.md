@@ -6,7 +6,9 @@ This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google
 
 ## Demo
 
-This repo is also a GitHub Pages demo app. The first demo is intentionally tiny: a Vite-built page that renders the word `yellow` in yellow.
+This repo is also a GitHub Pages demo app. The demo connects to Google in the browser, lets you create a fresh spreadsheet or open an existing spreadsheet URL/ID, and provides a responsive SQL editor for running arbitrary SQLite statements through the Google Sheets VFS.
+
+If you set `VITE_GOOGLE_API_KEY` for the demo build, the app also enables Google Drive Picker so users can select an existing spreadsheet from Drive. Without that key, users can still create a new spreadsheet or paste an existing spreadsheet URL/ID.
 
 The Pages workflow builds on pull requests and deploys on pushes to `main`.
 
