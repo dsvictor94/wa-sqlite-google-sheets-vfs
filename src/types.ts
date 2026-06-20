@@ -12,7 +12,7 @@ export type GoogleSheetsVFSOptions = {
 };
 
 export type GoogleBrowserSheetsConfig = {
-  apiKey: string;
+  apiKey?: string;
   clientId: string;
   scopes?: string;
 };
