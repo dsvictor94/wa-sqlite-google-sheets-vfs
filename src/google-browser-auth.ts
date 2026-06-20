@@ -23,7 +23,7 @@ export class GoogleBrowserAuth {
       gapi.load("client", async () => {
         try {
           await gapi.client.init({
-            apiKey: this.config.apiKey,
+            ...(this.config.apiKey ? { apiKey: this.config.apiKey } : {}),
             discoveryDocs: [SHEETS_DISCOVERY_DOC],
           });
           resolve();
