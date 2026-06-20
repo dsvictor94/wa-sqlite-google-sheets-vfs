@@ -213,6 +213,7 @@ function parseLockState(raw: string, databaseId: string): LockCellState {
       typeof parsed.ownerId === "string" &&
       typeof parsed.token === "string" &&
       isNonNegativeFiniteNumber(parsed.leaseUntilMs) &&
+      typeof parsed.revision === "number" &&
       Number.isSafeInteger(parsed.revision) &&
       parsed.revision >= 0
     ) {
