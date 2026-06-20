@@ -8,35 +8,9 @@ const JOURNAL = 1;
 const WAL = 2;
 const SUPER = 3;
 
-type RuntimeFileState = {
-  path: string;
-  slot: number | null;
-  size: number;
-  dirtySize: boolean;
-  dirty: Map<number, Uint8Array>;
-  memory: Map<number, Uint8Array>;
-};
+const proto = GoogleSheetsSQLiteVFS.prototype as any;
 
-type RuntimeVfs = {
-  files: Map<number, RuntimeFileState>;
-  mainPath: string | null;
-  lastError: unknown;
-  lockToken: string | null;
-  leaseUntil: number;
-  client: { batchUpdate(data: Array<{ range: string; values: unknown[][] }>): Promise<void> };
-  blockSheet: string;
-  slotFor(path: string, flags: number): number | null;
-  readSize(slot: number): Promise<number | null>;
-  writeSize(slot: number, path: string, size: number): Promise<void>;
-  acquireLease(): Promise<boolean>;
-  unlockLease(): Promise<void>;
-  readVisibleBlock(file: RuntimeFileState, blockIndex: number): Promise<Uint8Array>;
-  blockCell(slot: number, blockIndex: number): { row: number; col: number };
-};
-
-const proto = GoogleSheetsSQLiteVFS.prototype as unknown as Record<string, unknown>;
-
-proto.jOpen = async function jOpenPatched(this: RuntimeVfs, name: string | null, fileId: number, flags: number, pOutFlags: DataView): Promise<number> {
+proto.jOpen = async function jOpenPatched(name: string | null, fileId: number, flags: number, pOutFlags: DataView): Promise<number> {
   try {
     const path = normalizePath(name);
     const slot = this.slotFor(path, flags);
@@ -63,7 +37,7 @@ proto.jOpen = async function jOpenPatched(this: RuntimeVfs, name: string | null,
   }
 };
 
-proto.jWrite = async function jWritePatched(this: RuntimeVfs, fileId: number, data: Uint8Array, offset: number): Promise<number> {
+proto.jWrite = async function jWritePatched(fileId: number, data: Uint8Array, offset: number): Promise<number> {
   try {
     const file = this.files.get(fileId);
     if (!file) throw new Error(`Unknown file id ${fileId}`);
@@ -99,7 +73,7 @@ proto.jWrite = async function jWritePatched(this: RuntimeVfs, fileId: number, da
   }
 };
 
-proto.jTruncate = async function jTruncatePatched(this: RuntimeVfs, fileId: number, size: number): Promise<number> {
+proto.jTruncate = async function jTruncatePatched(fileId: number, size: number): Promise<number> {
   try {
     const file = this.files.get(fileId);
     if (!file) throw new Error(`Unknown file id ${fileId}`);
@@ -119,7 +93,7 @@ proto.jTruncate = async function jTruncatePatched(this: RuntimeVfs, fileId: numb
   }
 };
 
-proto.jAccess = async function jAccessPatched(this: RuntimeVfs, filename: string, _flags: number, pResOut: DataView): Promise<number> {
+proto.jAccess = async function jAccessPatched(filename: string, _flags: number, pResOut: DataView): Promise<number> {
   try {
     const slot = slotForPath(this, normalizePath(filename));
     if (slot === null) {
@@ -136,7 +110,7 @@ proto.jAccess = async function jAccessPatched(this: RuntimeVfs, filename: string
   }
 };
 
-proto.jDelete = async function jDeletePatched(this: RuntimeVfs, filename: string, _syncDir: number): Promise<number> {
+proto.jDelete = async function jDeletePatched(filename: string, _syncDir: number): Promise<number> {
   try {
     const path = normalizePath(filename);
     const slot = slotForPath(this, path);
@@ -161,7 +135,7 @@ proto.jDelete = async function jDeletePatched(this: RuntimeVfs, filename: string
   }
 };
 
-proto.jCheckReservedLock = async function jCheckReservedLockPatched(this: RuntimeVfs, _fileId: number, pResOut: DataView): Promise<number> {
+proto.jCheckReservedLock = async function jCheckReservedLockPatched(_fileId: number, pResOut: DataView): Promise<number> {
   try {
     pResOut.setInt32(0, this.lockToken && Date.now() < this.leaseUntil - 1000 ? 1 : 0, true);
     return VFS.SQLITE_OK;
@@ -171,7 +145,7 @@ proto.jCheckReservedLock = async function jCheckReservedLockPatched(this: Runtim
   }
 };
 
-proto.jGetLastError = function jGetLastErrorPatched(this: RuntimeVfs, zBuf: Uint8Array): number {
+proto.jGetLastError = function jGetLastErrorPatched(zBuf: Uint8Array): number {
   if (this.lastError) {
     const text = this.lastError instanceof Error ? this.lastError.stack ?? this.lastError.message : String(this.lastError);
     const out = zBuf.subarray(0, Math.max(0, zBuf.byteLength - 1));
@@ -182,7 +156,7 @@ proto.jGetLastError = function jGetLastErrorPatched(this: RuntimeVfs, zBuf: Uint
   return VFS.SQLITE_OK;
 };
 
-function slotForPath(vfs: RuntimeVfs, path: string): number | null {
+function slotForPath(vfs: any, path: string): number | null {
   if (vfs.mainPath && path === vfs.mainPath) return MAIN;
   if (vfs.mainPath && path === `${vfs.mainPath}-journal`) return JOURNAL;
   if (vfs.mainPath && path === `${vfs.mainPath}-wal`) return WAL;
