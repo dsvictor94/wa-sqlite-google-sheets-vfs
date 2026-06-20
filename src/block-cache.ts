@@ -1,29 +1,44 @@
 export class BlockCache {
-  private readonly entries = new Map<string, Uint8Array>();
-  private readonly order: string[] = [];
+  private readonly blocks = new Map<number, Uint8Array>();
 
-  constructor(private readonly maxEntries: number) {}
+  constructor(private readonly maxBlocks: number) {}
 
-  get(key: string): Uint8Array | undefined {
-    const value = this.entries.get(key);
-    if (!value) return undefined;
-    this.touch(key);
-    return value.slice();
+  get(blockIndex: number): Uint8Array | undefined {
+    const cached = this.blocks.get(blockIndex);
+    if (!cached) return undefined;
+
+    this.blocks.delete(blockIndex);
+    this.blocks.set(blockIndex, cached);
+    return cached.slice();
   }
 
-  set(key: string, value: Uint8Array): void {
-    this.entries.set(key, value.slice());
-    this.touch(key);
+  set(blockIndex: number, block: Uint8Array): void {
+    if (this.maxBlocks <= 0) return;
 
-    while (this.order.length > this.maxEntries) {
-      const oldest = this.order.shift();
-      if (oldest) this.entries.clear();
+    this.blocks.delete(blockIndex);
+    this.blocks.set(blockIndex, block.slice());
+    this.evictOldestBlocks();
+  }
+
+  delete(blockIndex: number): void {
+    this.blocks.delete(blockIndex);
+  }
+
+  deleteFrom(firstBlockIndex: number): void {
+    for (const blockIndex of this.blocks.keys()) {
+      if (blockIndex >= firstBlockIndex) this.blocks.delete(blockIndex);
     }
   }
 
-  private touch(key: string): void {
-    const index = this.order.indexOf(key);
-    if (index >= 0) this.order.splice(index, 1);
-    this.order.push(key);
+  clear(): void {
+    this.blocks.clear();
+  }
+
+  private evictOldestBlocks(): void {
+    while (this.blocks.size > this.maxBlocks) {
+      const oldest = this.blocks.keys().next().value as number | undefined;
+      if (oldest === undefined) return;
+      this.blocks.delete(oldest);
+    }
   }
 }
