@@ -1,6 +1,6 @@
 import * as VFS from "wa-sqlite/src/VFS.js";
 import { GoogleSheetsSQLiteVFS } from "./google-sheets-vfs.js";
-import { blocksTouched, normalizePath } from "./util.js";
+import { normalizePath } from "./util.js";
 
 const BLOCK = 1024;
 const MAIN = 0;
@@ -17,7 +17,7 @@ type RuntimeFileState = {
   memory: Map<number, Uint8Array>;
 };
 
-type RuntimeVfs = GoogleSheetsSQLiteVFS & {
+type RuntimeVfs = {
   files: Map<number, RuntimeFileState>;
   mainPath: string | null;
   lastError: unknown;
