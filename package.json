@@ -1,0 +1,1 @@
+{"name":"wa-sqlite-google-sheets-vfs","version":"0.1.0","description":"Use Google Sheets as a browser-native storage backend for SQLite via wa-sqlite VFS.","type":"module","main":"./dist/index.js","types":"./dist/index.d.ts","peerDependencies":{"wa-sqlite":">=1.1.0"},"devDependencies":{"typescript":"^5.5.0","wa-sqlite":"^1.1.1"}}
