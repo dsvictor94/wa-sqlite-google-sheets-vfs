@@ -10,6 +10,10 @@ This repo is also a GitHub Pages demo app. The first demo is intentionally tiny:
 
 The Pages workflow builds on pull requests and deploys on pushes to `main`.
 
+## Package status
+
+`wa-sqlite` is not published to npm, so the demo CI intentionally does not install it from npm yet. The next step is to choose how this repo should consume it: vendored source, git submodule, or a GitHub dependency/pinned archive.
+
 ## Features
 
 - Browser-only Google auth helper.
