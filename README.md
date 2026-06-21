@@ -6,7 +6,9 @@ This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google
 
 ## Demo
 
-This repo is also a GitHub Pages demo app. The demo connects to Google in the browser using only this OAuth scope:
+This repo is also a GitHub Pages demo app. The public demo intentionally does **not** ship a Google Picker `developerKey` or a Google OAuth client ID in the bundle. Users provide credentials from their own Google Cloud project in the page, and the values are stored only in that browser's local storage.
+
+The demo connects to Google using only this OAuth scope:
 
 ```txt
 https://www.googleapis.com/auth/drive.file
@@ -14,26 +16,28 @@ https://www.googleapis.com/auth/drive.file
 
 With `drive.file`, the app can read and write only the Google Drive files the user creates with the app or explicitly selects with Google Picker. For an existing spreadsheet, use the Picker button so Google grants this app access to that specific spreadsheet. Pasting a URL or ID is only for reopening a spreadsheet that was already created or selected with this app.
 
-If you set `VITE_GOOGLE_API_KEY` for the demo build, the app enables Google Picker so users can select an existing spreadsheet from Drive. Without that key, users can still create a new spreadsheet or reopen a spreadsheet the app already has access to.
+Why bring your own credentials? Google Picker requires a browser API key passed as `developerKey`. API keys in frontend bundles are public, and Google Cloud treats standard API keys as project identifiers for billing and quota. To avoid charging the project owner for someone else's Picker usage, this demo makes the user supply their own credentials instead of embedding a shared key.
 
 The Pages workflow builds on pull requests and deploys on pushes to `main`.
 
 ## Google Picker setup
 
-To enable Picker in the browser demo:
+To use Picker in the browser demo:
 
-1. In Google Cloud, use the same project for all credentials.
-2. Enable the Google Sheets API.
-3. Create an OAuth 2.0 Web client ID and add your local/demo origins, for example `http://localhost:5173` and your GitHub Pages origin.
-4. Create an API key and restrict it to your web origins.
-5. Configure the OAuth consent screen with only `https://www.googleapis.com/auth/drive.file`.
-6. Set the demo environment variable:
-
-```bash
-VITE_GOOGLE_API_KEY="<your-api-key>"
-```
-
-The demo already uses the OAuth client ID in `demo/main.ts`. If you fork this project, replace `GOOGLE_CLIENT_ID` with your own Web client ID. Picker also needs the Google Cloud project number as its app ID; the demo derives it from the client ID prefix.
+1. In Google Cloud, create or select a project.
+2. Enable the Google Sheets API and the Google Picker API / Drive API entries required by Picker in that project.
+3. Create an OAuth 2.0 Web client ID.
+4. Add authorized JavaScript origins for where the demo runs, for example:
+   - `http://localhost:5173`
+   - your GitHub Pages origin
+5. Create an API key and restrict it as much as possible:
+   - Application restriction: your web origins only.
+   - API restriction: only the Picker/Drive APIs required by Picker.
+6. Open **IAM & Admin → Settings** and copy the project number. This is the Picker `appId`.
+7. Paste these values into the demo page:
+   - OAuth Web client ID
+   - Google Cloud project number / Picker appId
+   - API key / Picker developerKey
 
 The core Picker flow is:
 
@@ -48,8 +52,8 @@ const view = new google.picker.DocsView(
 
 new google.picker.PickerBuilder()
   .addView(view)
-  .setDeveloperKey(import.meta.env.VITE_GOOGLE_API_KEY)
-  .setAppId("<google-cloud-project-number>")
+  .setDeveloperKey("<your-api-key>")
+  .setAppId("<your-google-cloud-project-number>")
   .setOAuthToken(token)
   .setCallback((data) => {
     if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
@@ -116,8 +120,7 @@ import {
 } from "wa-sqlite-google-sheets-vfs";
 
 const auth = new GoogleBrowserAuth({
-  apiKey: import.meta.env.VITE_GOOGLE_API_KEY,
-  clientId: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+  clientId: "<your-oauth-web-client-id>",
   scopes: DRIVE_FILE_SCOPE,
 });
 
