@@ -13,7 +13,7 @@ type ResultSet = { columns: string[]; rows: Array<Record<string, unknown>> };
 const env = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {});
 const GOOGLE_CLIENT_ID = env.VITE_GOOGLE_CLIENT_ID ?? "";
 const GOOGLE_API_KEY = env.VITE_GOOGLE_API_KEY ?? "";
-const GOOGLE_APP_ID = env.VITE_GOOGLE_APP_ID ?? deriveGoogleProjectNumber(GOOGLE_CLIENT_ID);
+const GOOGLE_APP_ID = env.VITE_GOOGLE_APP_ID ?? "";
 const DB_PATH = "/demo.db";
 const DB_ID = "sql-editor-demo";
 const SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet";
@@ -285,22 +285,20 @@ function spreadsheetUrl(spreadsheetId: string): string {
   return `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
 }
 
-function deriveGoogleProjectNumber(clientId: string): string {
-  return clientId.match(/^(\d+)-/)?.[1] ?? "";
-}
-
 function updateConfigHint(): void {
   if (!GOOGLE_CLIENT_ID) {
     configHint.textContent = "Demo is missing VITE_GOOGLE_CLIENT_ID. Set it in .env.local or GitHub Actions variables before building.";
   } else if (!GOOGLE_API_KEY) {
     configHint.textContent = "OAuth is configured. Picker is disabled until VITE_GOOGLE_API_KEY is set.";
+  } else if (!GOOGLE_APP_ID) {
+    configHint.textContent = "Picker is disabled until VITE_GOOGLE_APP_ID is set to the Google Cloud project number.";
   } else {
     configHint.textContent = "Google credentials are configured from build-time VITE_* variables.";
   }
 
-  pickerHint.textContent = GOOGLE_API_KEY
+  pickerHint.textContent = GOOGLE_API_KEY && GOOGLE_APP_ID
     ? "This demo requests only the drive.file scope. Picker grants access to the specific spreadsheet you choose."
-    : "Picker is disabled because VITE_GOOGLE_API_KEY was not set at build time. You can still create a new spreadsheet after connecting Google.";
+    : "Picker is disabled because VITE_GOOGLE_API_KEY or VITE_GOOGLE_APP_ID was not set at build time. You can still create a new spreadsheet after connecting Google.";
 }
 
 function renderDatabaseStatus(): void {
