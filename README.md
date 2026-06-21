@@ -20,7 +20,7 @@ The Pages workflow builds on pull requests and deploys on pushes to `main`.
 
 ## Demo configuration
 
-Set these variables before building the demo:
+Set these required variables before building the demo:
 
 ```bash
 VITE_GOOGLE_CLIENT_ID="<oauth-web-client-id>"
@@ -28,7 +28,7 @@ VITE_GOOGLE_API_KEY="<picker-developer-key>"
 VITE_GOOGLE_APP_ID="<google-cloud-project-number>"
 ```
 
-`VITE_GOOGLE_APP_ID` is the Google Cloud project number used by Google Picker. If you run locally and omit it, the demo tries to derive it from the numeric prefix of the OAuth client ID. For GitHub Pages, set it explicitly as a repository variable.
+`VITE_GOOGLE_APP_ID` is the Google Cloud project number used by Google Picker. It is required and must be set explicitly. Do not use the Google Cloud project ID string.
 
 For local development, create `demo/.env.local` or pass the variables in your shell before running Vite. For GitHub Pages, set repository variables under **Settings → Secrets and variables → Actions → Variables**:
 
