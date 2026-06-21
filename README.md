@@ -6,7 +6,7 @@ This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google
 
 ## Demo
 
-This repo is also a GitHub Pages demo app. The public demo intentionally does **not** ship a Google Picker `developerKey` or a Google OAuth client ID in the bundle. Users provide credentials from their own Google Cloud project in the page, and the values are stored only in that browser's local storage.
+This repo is also a GitHub Pages demo app. The demo credentials are configured at build time through Vite environment variables, so forks can replace the Google Cloud project without editing TypeScript source code.
 
 The demo connects to Google using only this OAuth scope:
 
@@ -16,9 +16,27 @@ https://www.googleapis.com/auth/drive.file
 
 With `drive.file`, the app can read and write only the Google Drive files the user creates with the app or explicitly selects with Google Picker. For an existing spreadsheet, use the Picker button so Google grants this app access to that specific spreadsheet. Pasting a URL or ID is only for reopening a spreadsheet that was already created or selected with this app.
 
-Why bring your own credentials? Google Picker requires a browser API key passed as `developerKey`. API keys in frontend bundles are public, and Google Cloud treats standard API keys as project identifiers for billing and quota. To avoid charging the project owner for someone else's Picker usage, this demo makes the user supply their own credentials instead of embedding a shared key.
-
 The Pages workflow builds on pull requests and deploys on pushes to `main`.
+
+## Demo configuration
+
+Set these variables before building the demo:
+
+```bash
+VITE_GOOGLE_CLIENT_ID="<oauth-web-client-id>"
+VITE_GOOGLE_API_KEY="<picker-developer-key>"
+VITE_GOOGLE_APP_ID="<google-cloud-project-number>"
+```
+
+`VITE_GOOGLE_APP_ID` is the Google Cloud project number used by Google Picker. If you run locally and omit it, the demo tries to derive it from the numeric prefix of the OAuth client ID. For GitHub Pages, set it explicitly as a repository variable.
+
+For local development, create `demo/.env.local` or pass the variables in your shell before running Vite. For GitHub Pages, set repository variables under **Settings → Secrets and variables → Actions → Variables**:
+
+- `VITE_GOOGLE_CLIENT_ID`
+- `VITE_GOOGLE_API_KEY`
+- `VITE_GOOGLE_APP_ID`
+
+The workflow passes those variables into the Vite build. They are embedded in the published JavaScript bundle, which is expected for browser OAuth client IDs, Picker app IDs, and browser API keys. Restrict the API key in Google Cloud to the GitHub Pages origin and only the APIs needed by Picker.
 
 ## Google Picker setup
 
@@ -34,10 +52,7 @@ To use Picker in the browser demo:
    - Application restriction: your web origins only.
    - API restriction: only the Picker/Drive APIs required by Picker.
 6. Open **IAM & Admin → Settings** and copy the project number. This is the Picker `appId`.
-7. Paste these values into the demo page:
-   - OAuth Web client ID
-   - Google Cloud project number / Picker appId
-   - API key / Picker developerKey
+7. Set the three `VITE_GOOGLE_*` variables above.
 
 The core Picker flow is:
 
@@ -52,8 +67,8 @@ const view = new google.picker.DocsView(
 
 new google.picker.PickerBuilder()
   .addView(view)
-  .setDeveloperKey("<your-api-key>")
-  .setAppId("<your-google-cloud-project-number>")
+  .setDeveloperKey(import.meta.env.VITE_GOOGLE_API_KEY)
+  .setAppId(import.meta.env.VITE_GOOGLE_APP_ID)
   .setOAuthToken(token)
   .setCallback((data) => {
     if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
