@@ -1,7 +1,7 @@
 import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite-async.mjs";
 import * as SQLite from "wa-sqlite";
 import wasmUrl from "wa-sqlite/dist/wa-sqlite-async.wasm?url";
-import { GoogleBrowserAuth, GoogleSheetsSQLiteVFS, createGoogleSheetsVfsSpreadsheet, ensureGoogleSheetsVfsTabs } from "../dist/index.js";
+import { DRIVE_FILE_SCOPE, GoogleBrowserAuth, GoogleSheetsSQLiteVFS, createGoogleSheetsVfsSpreadsheet, ensureGoogleSheetsVfsTabs } from "../dist/index.js";
 
 declare const gapi: any;
 declare const google: any;
@@ -39,11 +39,11 @@ app.innerHTML = `
     <section class="hero">
       <p class="eyebrow">wa-sqlite + Google Sheets VFS</p>
       <h1>SQLite backed by your Google spreadsheet.</h1>
-      <p class="lede">Create a spreadsheet, select an existing one, then run SQL against the VFS from a browser-only demo.</p>
+      <p class="lede">Create a spreadsheet, or select one with Google Picker, then run SQL against the VFS from a browser-only demo.</p>
     </section>
 
     <section class="card split">
-      <div><h2>1. Connect Google</h2><p>Authorize Sheets access. SQLite blocks are stored only in the spreadsheet you create or choose.</p></div>
+      <div><h2>1. Connect Google</h2><p>Authorize per-file Google Drive access. SQLite blocks are stored only in the spreadsheet you create or choose.</p></div>
       <button id="connect" type="button">Connect Google</button>
     </section>
 
@@ -55,7 +55,7 @@ app.innerHTML = `
       </div>
       <p id="picker-hint" class="hint"></p>
       <form id="open-existing" class="spreadsheet-form">
-        <label for="spreadsheet-input">Or paste a spreadsheet URL / ID</label>
+        <label for="spreadsheet-input">Or reopen a spreadsheet URL / ID already created or selected with this app</label>
         <div class="input-row">
           <input id="spreadsheet-input" type="text" inputmode="url" autocomplete="off" placeholder="https://docs.google.com/spreadsheets/d/..." />
           <button type="submit">Open</button>
@@ -103,14 +103,14 @@ let busy = false;
 
 sqlEditor.value = DEFAULT_SQL;
 pickerHint.textContent = GOOGLE_API_KEY
-  ? "Use the Drive Picker to select an existing Google Sheets file, or paste a URL/ID below."
-  : "Drive Picker needs VITE_GOOGLE_API_KEY. You can still create a spreadsheet or paste an existing URL/ID.";
+  ? "This demo requests only the drive.file scope. Use Picker to grant access to a specific existing spreadsheet."
+  : "Drive Picker needs VITE_GOOGLE_API_KEY. Without it, you can create a new spreadsheet or reopen a file this app already has access to.";
 renderDatabaseStatus();
 updateControls();
 
 connectButton.addEventListener("click", () => runTask(async () => {
   await connectGoogle(true);
-  log("Google access ready", "ok");
+  log("Google per-file access ready", "ok");
 }));
 
 createButton.addEventListener("click", () => runTask(async () => {
@@ -167,11 +167,11 @@ async function runTask(task: () => Promise<void>): Promise<void> {
 async function connectGoogle(forceConsent = false): Promise<void> {
   if (!auth) {
     log("Loading Google SDK", "info");
-    auth = new GoogleBrowserAuth({ clientId: GOOGLE_CLIENT_ID });
+    auth = new GoogleBrowserAuth({ clientId: GOOGLE_CLIENT_ID, scopes: DRIVE_FILE_SCOPE });
     await auth.init();
   }
   if (forceConsent || !accessToken()) {
-    log("Requesting Google Sheets access", "info");
+    log("Requesting per-file Google Drive access", "info");
     await auth.authorize(forceConsent ? "consent" : "");
   }
   connectButton.textContent = "Google connected";
@@ -239,7 +239,7 @@ async function runSql(): Promise<void> {
 }
 
 async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUrl: string } | undefined> {
-  if (!GOOGLE_API_KEY) throw new Error("Drive Picker is not configured. Set VITE_GOOGLE_API_KEY, or paste a spreadsheet URL/ID instead.");
+  if (!GOOGLE_API_KEY) throw new Error("Drive Picker is not configured. Set VITE_GOOGLE_API_KEY, or create a new spreadsheet instead.");
   const token = accessToken();
   if (!token) throw new Error("Google access token is missing. Connect Google first.");
   if (!(globalThis as any).google?.picker) await new Promise<void>((resolve) => gapi.load("picker", resolve));
@@ -251,6 +251,7 @@ async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUr
       .setSelectFolderEnabled(false);
     new picker.PickerBuilder()
       .addView(view)
+      .enableFeature(picker.Feature.SUPPORT_DRIVES)
       .setAppId(GOOGLE_PROJECT_NUMBER)
       .setDeveloperKey(GOOGLE_API_KEY)
       .setOAuthToken(token)
