@@ -3,7 +3,7 @@ import type { GoogleBrowserSheetsConfig } from "./types.js";
 export const SHEETS_DISCOVERY_DOC = "https://sheets.googleapis.com/$discovery/rest?version=v4";
 export const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 export const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-export const DEFAULT_GOOGLE_SCOPES = `${SHEETS_SCOPE} ${DRIVE_FILE_SCOPE}`;
+export const DEFAULT_GOOGLE_SCOPES = DRIVE_FILE_SCOPE;
 
 type GoogleToken = {
   access_token?: string;

@@ -6,11 +6,82 @@ This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google
 
 ## Demo
 
-This repo is also a GitHub Pages demo app. The demo connects to Google in the browser, lets you create a fresh spreadsheet or open an existing spreadsheet URL/ID, and provides a responsive SQL editor for running arbitrary SQLite statements through the Google Sheets VFS.
+This repo is also a GitHub Pages demo app. The demo credentials are configured at build time through required Vite environment variables, so forks can replace the Google Cloud project without editing TypeScript source code.
 
-If you set `VITE_GOOGLE_API_KEY` for the demo build, the app also enables Google Drive Picker so users can select an existing spreadsheet from Drive. Without that key, users can still create a new spreadsheet or paste an existing spreadsheet URL/ID.
+The demo connects to Google using only this OAuth scope:
+
+```txt
+https://www.googleapis.com/auth/drive.file
+```
+
+With `drive.file`, the app can read and write only the Google Drive files the user creates with the app or explicitly selects with Google Picker. For an existing spreadsheet, use the Picker button so Google grants this app access to that specific spreadsheet. Pasting a URL or ID is only for reopening a spreadsheet that was already created or selected with this app.
 
 The Pages workflow builds on pull requests and deploys on pushes to `main`.
+
+## Demo configuration
+
+Set these required variables before building the demo:
+
+```bash
+VITE_GOOGLE_CLIENT_ID="<oauth-web-client-id>"
+VITE_GOOGLE_API_KEY="<picker-developer-key>"
+VITE_GOOGLE_APP_ID="<google-cloud-project-number>"
+```
+
+The demo fails during startup if any of these variables are missing.
+
+`VITE_GOOGLE_APP_ID` is the Google Cloud project number used by Google Picker. It is required and must be set explicitly. Do not use the Google Cloud project ID string.
+
+For local development, create `demo/.env.local` or pass the variables in your shell before running Vite. For GitHub Pages, set repository variables under **Settings → Secrets and variables → Actions → Variables**:
+
+- `VITE_GOOGLE_CLIENT_ID`
+- `VITE_GOOGLE_API_KEY`
+- `VITE_GOOGLE_APP_ID`
+
+The workflow passes those variables into the Vite build. They are embedded in the published JavaScript bundle, which is expected for browser OAuth client IDs, Picker app IDs, and browser API keys. Restrict the API key in Google Cloud to the GitHub Pages origin and only the APIs needed by Picker.
+
+## Google Picker setup
+
+To use Picker in the browser demo:
+
+1. In Google Cloud, create or select a project.
+2. Enable the Google Sheets API and the Google Picker API / Drive API entries required by Picker in that project.
+3. Create an OAuth 2.0 Web client ID.
+4. Add authorized JavaScript origins for where the demo runs, for example:
+   - `http://localhost:5173`
+   - your GitHub Pages origin
+5. Create an API key and restrict it as much as possible:
+   - Application restriction: your web origins only.
+   - API restriction: only the Picker/Drive APIs required by Picker.
+6. Open **IAM & Admin → Settings** and copy the project number. This is the Picker `appId`.
+7. Set the three `VITE_GOOGLE_*` variables above.
+
+The core Picker flow is:
+
+```ts
+const token = gapi.client.getToken()?.access_token;
+
+const view = new google.picker.DocsView(
+  google.picker.ViewId.SPREADSHEETS ?? google.picker.ViewId.DOCS,
+)
+  .setMimeTypes("application/vnd.google-apps.spreadsheet")
+  .setSelectFolderEnabled(false);
+
+new google.picker.PickerBuilder()
+  .addView(view)
+  .setDeveloperKey(import.meta.env.VITE_GOOGLE_API_KEY)
+  .setAppId(import.meta.env.VITE_GOOGLE_APP_ID)
+  .setOAuthToken(token)
+  .setCallback((data) => {
+    if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
+
+    const selected = data[google.picker.Response.DOCUMENTS][0];
+    const spreadsheetId = selected[google.picker.Document.ID];
+    // Use spreadsheetId with the Sheets API.
+  })
+  .build()
+  .setVisible(true);
+```
 
 ## Package status
 
@@ -59,20 +130,21 @@ Do not use WAL unless shared-memory semantics are added to the VFS.
 import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite-async.mjs";
 import * as SQLite from "wa-sqlite";
 import {
+  DRIVE_FILE_SCOPE,
   GoogleBrowserAuth,
   GoogleSheetsSQLiteVFS,
   ensureGoogleSheetsVfsTabs,
 } from "wa-sqlite-google-sheets-vfs";
 
 const auth = new GoogleBrowserAuth({
-  apiKey: import.meta.env.VITE_GOOGLE_API_KEY,
-  clientId: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+  clientId: "<your-oauth-web-client-id>",
+  scopes: DRIVE_FILE_SCOPE,
 });
 
 await auth.init();
 await auth.authorize();
 
-const spreadsheetId = "<spreadsheet-id>";
+const spreadsheetId = "<spreadsheet-id-selected-with-picker-or-created-by-this-app>";
 await ensureGoogleSheetsVfsTabs(spreadsheetId);
 
 const module = await SQLiteESMFactory();

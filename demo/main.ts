@@ -1,7 +1,7 @@
 import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite-async.mjs";
 import * as SQLite from "wa-sqlite";
 import wasmUrl from "wa-sqlite/dist/wa-sqlite-async.wasm?url";
-import { GoogleBrowserAuth, GoogleSheetsSQLiteVFS, createGoogleSheetsVfsSpreadsheet, ensureGoogleSheetsVfsTabs } from "../dist/index.js";
+import { DRIVE_FILE_SCOPE, GoogleBrowserAuth, GoogleSheetsSQLiteVFS, createGoogleSheetsVfsSpreadsheet, ensureGoogleSheetsVfsTabs } from "../dist/index.js";
 
 declare const gapi: any;
 declare const google: any;
@@ -10,9 +10,10 @@ type LogLevel = "info" | "ok" | "error";
 type ActiveDatabase = { db: unknown; spreadsheetId: string; spreadsheetUrl: string };
 type ResultSet = { columns: string[]; rows: Array<Record<string, unknown>> };
 
-const GOOGLE_CLIENT_ID = "429619695141-pamk25d0kjf42pb09trdao4ostc3132o.apps.googleusercontent.com";
-const GOOGLE_PROJECT_NUMBER = GOOGLE_CLIENT_ID.split("-")[0] ?? "";
-const GOOGLE_API_KEY = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {}).VITE_GOOGLE_API_KEY ?? "";
+const env = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {});
+const GOOGLE_CLIENT_ID = requiredEnv("VITE_GOOGLE_CLIENT_ID");
+const GOOGLE_API_KEY = requiredEnv("VITE_GOOGLE_API_KEY");
+const GOOGLE_APP_ID = requiredEnv("VITE_GOOGLE_APP_ID");
 const DB_PATH = "/demo.db";
 const DB_ID = "sql-editor-demo";
 const SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet";
@@ -39,11 +40,11 @@ app.innerHTML = `
     <section class="hero">
       <p class="eyebrow">wa-sqlite + Google Sheets VFS</p>
       <h1>SQLite backed by your Google spreadsheet.</h1>
-      <p class="lede">Create a spreadsheet, select an existing one, then run SQL against the VFS from a browser-only demo.</p>
+      <p class="lede">Create a spreadsheet, or select one with Google Picker, then run SQL against the VFS from a browser-only demo.</p>
     </section>
 
     <section class="card split">
-      <div><h2>1. Connect Google</h2><p>Authorize Sheets access. SQLite blocks are stored only in the spreadsheet you create or choose.</p></div>
+      <div><h2>1. Connect Google</h2><p>Authorize per-file Google Drive access. SQLite blocks are stored only in the spreadsheet you create or choose.</p><p id="config-hint" class="hint"></p></div>
       <button id="connect" type="button">Connect Google</button>
     </section>
 
@@ -55,7 +56,7 @@ app.innerHTML = `
       </div>
       <p id="picker-hint" class="hint"></p>
       <form id="open-existing" class="spreadsheet-form">
-        <label for="spreadsheet-input">Or paste a spreadsheet URL / ID</label>
+        <label for="spreadsheet-input">Or reopen a spreadsheet URL / ID already created or selected with this app</label>
         <div class="input-row">
           <input id="spreadsheet-input" type="text" inputmode="url" autocomplete="off" placeholder="https://docs.google.com/spreadsheets/d/..." />
           <button type="submit">Open</button>
@@ -81,6 +82,7 @@ app.innerHTML = `
   </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
+const configHint = $<HTMLParagraphElement>("#config-hint");
 const connectButton = $<HTMLButtonElement>("#connect");
 const createButton = $<HTMLButtonElement>("#create-spreadsheet");
 const pickButton = $<HTMLButtonElement>("#pick-spreadsheet");
@@ -102,15 +104,14 @@ let db: ActiveDatabase | undefined;
 let busy = false;
 
 sqlEditor.value = DEFAULT_SQL;
-pickerHint.textContent = GOOGLE_API_KEY
-  ? "Use the Drive Picker to select an existing Google Sheets file, or paste a URL/ID below."
-  : "Drive Picker needs VITE_GOOGLE_API_KEY. You can still create a spreadsheet or paste an existing URL/ID.";
+configHint.textContent = "Google credentials are configured from required build-time VITE_* variables.";
+pickerHint.textContent = "This demo requests only the drive.file scope. Picker grants access to the specific spreadsheet you choose.";
 renderDatabaseStatus();
 updateControls();
 
 connectButton.addEventListener("click", () => runTask(async () => {
   await connectGoogle(true);
-  log("Google access ready", "ok");
+  log("Google per-file access ready", "ok");
 }));
 
 createButton.addEventListener("click", () => runTask(async () => {
@@ -167,11 +168,11 @@ async function runTask(task: () => Promise<void>): Promise<void> {
 async function connectGoogle(forceConsent = false): Promise<void> {
   if (!auth) {
     log("Loading Google SDK", "info");
-    auth = new GoogleBrowserAuth({ clientId: GOOGLE_CLIENT_ID });
+    auth = new GoogleBrowserAuth({ clientId: GOOGLE_CLIENT_ID, scopes: DRIVE_FILE_SCOPE });
     await auth.init();
   }
   if (forceConsent || !accessToken()) {
-    log("Requesting Google Sheets access", "info");
+    log("Requesting per-file Google Drive access", "info");
     await auth.authorize(forceConsent ? "consent" : "");
   }
   connectButton.textContent = "Google connected";
@@ -239,7 +240,6 @@ async function runSql(): Promise<void> {
 }
 
 async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUrl: string } | undefined> {
-  if (!GOOGLE_API_KEY) throw new Error("Drive Picker is not configured. Set VITE_GOOGLE_API_KEY, or paste a spreadsheet URL/ID instead.");
   const token = accessToken();
   if (!token) throw new Error("Google access token is missing. Connect Google first.");
   if (!(globalThis as any).google?.picker) await new Promise<void>((resolve) => gapi.load("picker", resolve));
@@ -251,7 +251,8 @@ async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUr
       .setSelectFolderEnabled(false);
     new picker.PickerBuilder()
       .addView(view)
-      .setAppId(GOOGLE_PROJECT_NUMBER)
+      .enableFeature(picker.Feature.SUPPORT_DRIVES)
+      .setAppId(GOOGLE_APP_ID)
       .setDeveloperKey(GOOGLE_API_KEY)
       .setOAuthToken(token)
       .setCallback((data: any) => {
@@ -266,6 +267,12 @@ async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUr
       .build()
       .setVisible(true);
   });
+}
+
+function requiredEnv(name: string): string {
+  const value = env[name]!;
+  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+  return value;
 }
 
 function accessToken(): string | undefined {
@@ -320,7 +327,7 @@ function log(message: string, level: LogLevel): void {
 function updateControls(): void {
   connectButton.disabled = busy;
   createButton.disabled = busy;
-  pickButton.disabled = busy || !GOOGLE_API_KEY;
+  pickButton.disabled = busy;
   spreadsheetInput.disabled = busy;
   openForm.querySelector<HTMLButtonElement>("button")!.disabled = busy;
   runButton.disabled = busy || !db;
