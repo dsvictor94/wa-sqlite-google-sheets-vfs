@@ -11,9 +11,9 @@ type ActiveDatabase = { db: unknown; spreadsheetId: string; spreadsheetUrl: stri
 type ResultSet = { columns: string[]; rows: Array<Record<string, unknown>> };
 
 const env = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {});
-const GOOGLE_CLIENT_ID = env.VITE_GOOGLE_CLIENT_ID ?? "";
-const GOOGLE_API_KEY = env.VITE_GOOGLE_API_KEY ?? "";
-const GOOGLE_APP_ID = env.VITE_GOOGLE_APP_ID ?? "";
+const GOOGLE_CLIENT_ID = requiredEnv("VITE_GOOGLE_CLIENT_ID");
+const GOOGLE_API_KEY = requiredEnv("VITE_GOOGLE_API_KEY");
+const GOOGLE_APP_ID = requiredEnv("VITE_GOOGLE_APP_ID");
 const DB_PATH = "/demo.db";
 const DB_ID = "sql-editor-demo";
 const SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet";
@@ -104,7 +104,8 @@ let db: ActiveDatabase | undefined;
 let busy = false;
 
 sqlEditor.value = DEFAULT_SQL;
-updateConfigHint();
+configHint.textContent = "Google credentials are configured from required build-time VITE_* variables.";
+pickerHint.textContent = "This demo requests only the drive.file scope. Picker grants access to the specific spreadsheet you choose.";
 renderDatabaseStatus();
 updateControls();
 
@@ -165,8 +166,6 @@ async function runTask(task: () => Promise<void>): Promise<void> {
 }
 
 async function connectGoogle(forceConsent = false): Promise<void> {
-  if (!GOOGLE_CLIENT_ID) throw new Error("Set VITE_GOOGLE_CLIENT_ID before building the demo.");
-
   if (!auth) {
     log("Loading Google SDK", "info");
     auth = new GoogleBrowserAuth({ clientId: GOOGLE_CLIENT_ID, scopes: DRIVE_FILE_SCOPE });
@@ -241,8 +240,6 @@ async function runSql(): Promise<void> {
 }
 
 async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUrl: string } | undefined> {
-  if (!GOOGLE_API_KEY) throw new Error("Set VITE_GOOGLE_API_KEY before building the demo.");
-  if (!GOOGLE_APP_ID) throw new Error("Set VITE_GOOGLE_APP_ID to the Google Cloud project number before building the demo.");
   const token = accessToken();
   if (!token) throw new Error("Google access token is missing. Connect Google first.");
   if (!(globalThis as any).google?.picker) await new Promise<void>((resolve) => gapi.load("picker", resolve));
@@ -272,6 +269,12 @@ async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUr
   });
 }
 
+function requiredEnv(name: string): string {
+  const value = env[name]!;
+  if (!value) throw new Error(`Missing required environment variable: ${name}`);
+  return value;
+}
+
 function accessToken(): string | undefined {
   try { return gapi.client.getToken?.()?.access_token; } catch { return undefined; }
 }
@@ -283,22 +286,6 @@ function extractSpreadsheetId(value: string): string | undefined {
 
 function spreadsheetUrl(spreadsheetId: string): string {
   return `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
-}
-
-function updateConfigHint(): void {
-  if (!GOOGLE_CLIENT_ID) {
-    configHint.textContent = "Demo is missing VITE_GOOGLE_CLIENT_ID. Set it in .env.local or GitHub Actions variables before building.";
-  } else if (!GOOGLE_API_KEY) {
-    configHint.textContent = "OAuth is configured. Picker is disabled until VITE_GOOGLE_API_KEY is set.";
-  } else if (!GOOGLE_APP_ID) {
-    configHint.textContent = "Picker is disabled until VITE_GOOGLE_APP_ID is set to the Google Cloud project number.";
-  } else {
-    configHint.textContent = "Google credentials are configured from build-time VITE_* variables.";
-  }
-
-  pickerHint.textContent = GOOGLE_API_KEY && GOOGLE_APP_ID
-    ? "This demo requests only the drive.file scope. Picker grants access to the specific spreadsheet you choose."
-    : "Picker is disabled because VITE_GOOGLE_API_KEY or VITE_GOOGLE_APP_ID was not set at build time. You can still create a new spreadsheet after connecting Google.";
 }
 
 function renderDatabaseStatus(): void {
@@ -338,11 +325,11 @@ function log(message: string, level: LogLevel): void {
 }
 
 function updateControls(): void {
-  connectButton.disabled = busy || !GOOGLE_CLIENT_ID;
-  createButton.disabled = busy || !GOOGLE_CLIENT_ID;
-  pickButton.disabled = busy || !GOOGLE_CLIENT_ID || !GOOGLE_API_KEY || !GOOGLE_APP_ID;
+  connectButton.disabled = busy;
+  createButton.disabled = busy;
+  pickButton.disabled = busy;
   spreadsheetInput.disabled = busy;
-  openForm.querySelector<HTMLButtonElement>("button")!.disabled = busy || !GOOGLE_CLIENT_ID;
+  openForm.querySelector<HTMLButtonElement>("button")!.disabled = busy;
   runButton.disabled = busy || !db;
   resetButton.disabled = busy;
   clearButton.disabled = busy;
