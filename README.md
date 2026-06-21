@@ -6,7 +6,7 @@ This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google
 
 ## Demo
 
-This repo is also a GitHub Pages demo app. The demo credentials are configured at build time through Vite environment variables, so forks can replace the Google Cloud project without editing TypeScript source code.
+This repo is also a GitHub Pages demo app. The demo credentials are configured at build time through required Vite environment variables, so forks can replace the Google Cloud project without editing TypeScript source code.
 
 The demo connects to Google using only this OAuth scope:
 
@@ -27,6 +27,8 @@ VITE_GOOGLE_CLIENT_ID="<oauth-web-client-id>"
 VITE_GOOGLE_API_KEY="<picker-developer-key>"
 VITE_GOOGLE_APP_ID="<google-cloud-project-number>"
 ```
+
+The demo fails during startup if any of these variables are missing.
 
 `VITE_GOOGLE_APP_ID` is the Google Cloud project number used by Google Picker. It is required and must be set explicitly. Do not use the Google Cloud project ID string.
 
