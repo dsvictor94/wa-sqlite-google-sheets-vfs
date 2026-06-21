@@ -9,10 +9,9 @@ declare const google: any;
 type LogLevel = "info" | "ok" | "error";
 type ActiveDatabase = { db: unknown; spreadsheetId: string; spreadsheetUrl: string };
 type ResultSet = { columns: string[]; rows: Array<Record<string, unknown>> };
+type GoogleDemoConfig = { clientId: string; appId: string; apiKey: string };
 
-const GOOGLE_CLIENT_ID = "429619695141-pamk25d0kjf42pb09trdao4ostc3132o.apps.googleusercontent.com";
-const GOOGLE_PROJECT_NUMBER = GOOGLE_CLIENT_ID.split("-")[0] ?? "";
-const GOOGLE_API_KEY = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {}).VITE_GOOGLE_API_KEY ?? "";
+const GOOGLE_CONFIG_STORAGE_KEY = "wa-sqlite-google-sheets-vfs-demo-google-config";
 const DB_PATH = "/demo.db";
 const DB_ID = "sql-editor-demo";
 const SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet";
@@ -42,13 +41,34 @@ app.innerHTML = `
       <p class="lede">Create a spreadsheet, or select one with Google Picker, then run SQL against the VFS from a browser-only demo.</p>
     </section>
 
+    <section class="card">
+      <h2>1. Google Cloud credentials</h2>
+      <p>This public demo does not ship a developer key. Use credentials from your own Google Cloud project so Picker usage and quota stay on your project.</p>
+      <form id="google-config" class="spreadsheet-form">
+        <label for="google-client-id">OAuth Web client ID</label>
+        <div class="input-row">
+          <input id="google-client-id" type="text" autocomplete="off" placeholder="123456789012-abc.apps.googleusercontent.com" />
+        </div>
+        <label for="google-app-id">Google Cloud project number / Picker appId</label>
+        <div class="input-row">
+          <input id="google-app-id" type="text" inputmode="numeric" autocomplete="off" placeholder="123456789012" />
+        </div>
+        <label for="google-api-key">API key / Picker developerKey</label>
+        <div class="input-row">
+          <input id="google-api-key" type="text" autocomplete="off" placeholder="AIza..." />
+          <button type="submit">Save</button>
+        </div>
+      </form>
+      <p id="config-hint" class="hint"></p>
+    </section>
+
     <section class="card split">
-      <div><h2>1. Connect Google</h2><p>Authorize per-file Google Drive access. SQLite blocks are stored only in the spreadsheet you create or choose.</p></div>
+      <div><h2>2. Connect Google</h2><p>Authorize per-file Google Drive access. SQLite blocks are stored only in the spreadsheet you create or choose.</p></div>
       <button id="connect" type="button">Connect Google</button>
     </section>
 
     <section class="card">
-      <h2>2. Choose storage</h2>
+      <h2>3. Choose storage</h2>
       <div class="actions">
         <button id="create-spreadsheet" type="button">Create new spreadsheet</button>
         <button id="pick-spreadsheet" type="button">Select from Drive</button>
@@ -66,7 +86,7 @@ app.innerHTML = `
 
     <section class="card">
       <div class="split editor-heading">
-        <div><h2>3. SQL editor</h2><p>Use <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> on desktop, or the run button on mobile.</p></div>
+        <div><h2>4. SQL editor</h2><p>Use <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> on desktop, or the run button on mobile.</p></div>
         <div class="actions editor-actions">
           <button id="reset-sql" type="button" class="secondary">Reset</button>
           <button id="clear-results" type="button" class="secondary">Clear</button>
@@ -81,6 +101,11 @@ app.innerHTML = `
   </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
+const configForm = $<HTMLFormElement>("#google-config");
+const googleClientIdInput = $<HTMLInputElement>("#google-client-id");
+const googleAppIdInput = $<HTMLInputElement>("#google-app-id");
+const googleApiKeyInput = $<HTMLInputElement>("#google-api-key");
+const configHint = $<HTMLParagraphElement>("#config-hint");
 const connectButton = $<HTMLButtonElement>("#connect");
 const createButton = $<HTMLButtonElement>("#create-spreadsheet");
 const pickButton = $<HTMLButtonElement>("#pick-spreadsheet");
@@ -95,18 +120,30 @@ const clearButton = $<HTMLButtonElement>("#clear-results");
 const results = $<HTMLElement>("#query-results");
 const logList = $<HTMLOListElement>("#log");
 
+let googleConfig = loadGoogleConfig();
 let auth: GoogleBrowserAuth | undefined;
+let authClientId: string | undefined;
 let sqliteModule: unknown;
 let sqlite3: any;
 let db: ActiveDatabase | undefined;
 let busy = false;
 
+googleClientIdInput.value = googleConfig.clientId;
+googleAppIdInput.value = googleConfig.appId;
+googleApiKeyInput.value = googleConfig.apiKey;
 sqlEditor.value = DEFAULT_SQL;
-pickerHint.textContent = GOOGLE_API_KEY
-  ? "This demo requests only the drive.file scope. Use Picker to grant access to a specific existing spreadsheet."
-  : "Drive Picker needs VITE_GOOGLE_API_KEY. Without it, you can create a new spreadsheet or reopen a file this app already has access to.";
+updateConfigHint();
 renderDatabaseStatus();
 updateControls();
+
+configForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveGoogleConfigFromForm();
+  resetAuthIfClientChanged();
+  log("Google Cloud credentials saved locally in this browser", "ok");
+  updateConfigHint();
+  updateControls();
+});
 
 connectButton.addEventListener("click", () => runTask(async () => {
   await connectGoogle(true);
@@ -160,16 +197,24 @@ async function runTask(task: () => Promise<void>): Promise<void> {
     console.error(error);
   } finally {
     busy = false;
+    updateConfigHint();
     updateControls();
   }
 }
 
 async function connectGoogle(forceConsent = false): Promise<void> {
-  if (!auth) {
+  saveGoogleConfigFromForm();
+  const config = googleConfig;
+  if (!config.clientId) throw new Error("Enter an OAuth Web client ID from your Google Cloud project first.");
+
+  if (!auth || authClientId !== config.clientId) {
+    if (auth) auth.signOut();
     log("Loading Google SDK", "info");
-    auth = new GoogleBrowserAuth({ clientId: GOOGLE_CLIENT_ID, scopes: DRIVE_FILE_SCOPE });
+    auth = new GoogleBrowserAuth({ clientId: config.clientId, scopes: DRIVE_FILE_SCOPE });
+    authClientId = config.clientId;
     await auth.init();
   }
+
   if (forceConsent || !accessToken()) {
     log("Requesting per-file Google Drive access", "info");
     await auth.authorize(forceConsent ? "consent" : "");
@@ -239,7 +284,10 @@ async function runSql(): Promise<void> {
 }
 
 async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUrl: string } | undefined> {
-  if (!GOOGLE_API_KEY) throw new Error("Drive Picker is not configured. Set VITE_GOOGLE_API_KEY, or create a new spreadsheet instead.");
+  saveGoogleConfigFromForm();
+  const config = googleConfig;
+  if (!config.apiKey) throw new Error("Enter your own API key / Picker developerKey first. This demo does not ship one to avoid charging the project owner.");
+  if (!config.appId) throw new Error("Enter your Google Cloud project number as the Picker appId.");
   const token = accessToken();
   if (!token) throw new Error("Google access token is missing. Connect Google first.");
   if (!(globalThis as any).google?.picker) await new Promise<void>((resolve) => gapi.load("picker", resolve));
@@ -252,8 +300,8 @@ async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUr
     new picker.PickerBuilder()
       .addView(view)
       .enableFeature(picker.Feature.SUPPORT_DRIVES)
-      .setAppId(GOOGLE_PROJECT_NUMBER)
-      .setDeveloperKey(GOOGLE_API_KEY)
+      .setAppId(config.appId)
+      .setDeveloperKey(config.apiKey)
       .setOAuthToken(token)
       .setCallback((data: any) => {
         const action = data[picker.Response.ACTION];
@@ -280,6 +328,56 @@ function extractSpreadsheetId(value: string): string | undefined {
 
 function spreadsheetUrl(spreadsheetId: string): string {
   return `https://docs.google.com/spreadsheets/d/${spreadsheetId}`;
+}
+
+function loadGoogleConfig(): GoogleDemoConfig {
+  try {
+    const raw = localStorage.getItem(GOOGLE_CONFIG_STORAGE_KEY);
+    if (!raw) return { clientId: "", appId: "", apiKey: "" };
+    const parsed = JSON.parse(raw) as Partial<GoogleDemoConfig>;
+    return {
+      clientId: parsed.clientId?.trim() ?? "",
+      appId: parsed.appId?.trim() ?? "",
+      apiKey: parsed.apiKey?.trim() ?? "",
+    };
+  } catch {
+    return { clientId: "", appId: "", apiKey: "" };
+  }
+}
+
+function saveGoogleConfigFromForm(): void {
+  const clientId = googleClientIdInput.value.trim();
+  const appId = googleAppIdInput.value.trim() || deriveGoogleProjectNumber(clientId);
+  googleConfig = { clientId, appId, apiKey: googleApiKeyInput.value.trim() };
+  googleAppIdInput.value = appId;
+  localStorage.setItem(GOOGLE_CONFIG_STORAGE_KEY, JSON.stringify(googleConfig));
+}
+
+function resetAuthIfClientChanged(): void {
+  if (!auth || !authClientId || authClientId === googleConfig.clientId) return;
+  auth.signOut();
+  auth = undefined;
+  authClientId = undefined;
+  connectButton.textContent = "Connect Google";
+}
+
+function deriveGoogleProjectNumber(clientId: string): string {
+  return clientId.match(/^(\d+)-/)?.[1] ?? "";
+}
+
+function updateConfigHint(): void {
+  const config = { clientId: googleClientIdInput.value.trim(), appId: googleAppIdInput.value.trim(), apiKey: googleApiKeyInput.value.trim() };
+  if (!config.clientId) {
+    configHint.textContent = "Enter credentials from your own Google Cloud project. Nothing is sent to this app server; values are stored only in this browser.";
+  } else if (!config.apiKey) {
+    configHint.textContent = "Create new spreadsheet works with OAuth. Selecting an existing spreadsheet needs your API key / developerKey for Google Picker.";
+  } else {
+    configHint.textContent = "Credentials are set. Use Connect Google, then create a new spreadsheet or select an existing one with Picker.";
+  }
+
+  pickerHint.textContent = config.apiKey
+    ? "This demo requests only the drive.file scope. Picker grants access to the specific spreadsheet you choose."
+    : "Picker is disabled until you enter your own API key. You can still create a new spreadsheet after connecting Google.";
 }
 
 function renderDatabaseStatus(): void {
@@ -319,11 +417,13 @@ function log(message: string, level: LogLevel): void {
 }
 
 function updateControls(): void {
-  connectButton.disabled = busy;
-  createButton.disabled = busy;
-  pickButton.disabled = busy || !GOOGLE_API_KEY;
+  const config = { clientId: googleClientIdInput.value.trim(), apiKey: googleApiKeyInput.value.trim() };
+  configForm.querySelector<HTMLButtonElement>("button")!.disabled = busy;
+  connectButton.disabled = busy || !config.clientId;
+  createButton.disabled = busy || !config.clientId;
+  pickButton.disabled = busy || !config.clientId || !config.apiKey;
   spreadsheetInput.disabled = busy;
-  openForm.querySelector<HTMLButtonElement>("button")!.disabled = busy;
+  openForm.querySelector<HTMLButtonElement>("button")!.disabled = busy || !config.clientId;
   runButton.disabled = busy || !db;
   resetButton.disabled = busy;
   clearButton.disabled = busy;
