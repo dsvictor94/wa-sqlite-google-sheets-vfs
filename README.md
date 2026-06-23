@@ -124,6 +124,16 @@ PRAGMA synchronous=FULL;
 
 Do not use WAL unless shared-memory semantics are added to the VFS.
 
+For multi-statement writes, prefer an explicit transaction so SQLite does not perform a full lock/unlock cycle for every individual statement:
+
+```sql
+BEGIN IMMEDIATE;
+-- related writes
+COMMIT;
+```
+
+The VFS keeps multi-user safety by holding the Google Sheets lease while it has unflushed work. After SQLite unlocks to `SQLITE_LOCK_NONE`, the VFS waits for `lockReleaseDelayMs` before flushing any remaining dirty state and releasing the lease. If SQLite uses the VFS again before that delay expires, the scheduled release is canceled. This coalesces short lock/unlock bursts without allowing another browser to acquire the spreadsheet before pending data is flushed.
+
 ## Browser usage
 
 ```ts
