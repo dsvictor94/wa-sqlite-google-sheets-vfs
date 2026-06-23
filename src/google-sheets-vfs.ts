@@ -13,7 +13,7 @@ import { slotForOpen, slotForPath } from "./file-slots.js";
 import { GoogleSheetsBlockStore } from "./google-sheets-block-store.js";
 import { GoogleSdkSheetsClient } from "./google-sheets-client.js";
 import { GoogleSheetsLease } from "./google-sheets-lease.js";
-import type { GoogleSheetsVFSOptions } from "./types.js";
+import type { GoogleSheetsVFSMetricDetail, GoogleSheetsVFSMetrics, GoogleSheetsVFSOptions } from "./types.js";
 import { blocksTouched, copyFixedBlock, normalizePath } from "./util.js";
 
 const SQLITE_LOCK_NONE = VFS.SQLITE_LOCK_NONE;
@@ -26,6 +26,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private readonly lease: GoogleSheetsLease;
   private readonly cacheBlocks: number;
   private readonly lockReleaseDelayMs: number;
+  private readonly metrics?: GoogleSheetsVFSMetrics;
   private readonly files = new Map<number, VfsFileState>();
   private mainPath: string | null = null;
   private lastError: unknown = null;
@@ -57,6 +58,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     this.client = new GoogleSdkSheetsClient(options.spreadsheetId);
     this.cacheBlocks = options.cacheBlocks ?? DEFAULT_CACHE_BLOCKS;
     this.lockReleaseDelayMs = lockReleaseDelayMs;
+    this.metrics = options.metrics;
     this.store = new GoogleSheetsBlockStore(this.client, {
       blockSheetName: options.blockSheetName,
       blocksPerStripe,
@@ -76,7 +78,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   }
 
   async jOpen(name: string | null, fileId: number, flags: number, pOutFlags: DataView): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_CANTOPEN, async () => {
+    return this.measureSqlite("jOpen", { fileId, flags, hasName: name !== null }, () => this.withError(VFS.SQLITE_CANTOPEN, async () => {
       await this.prepareForUse();
 
       const path = normalizePath(name);
@@ -87,11 +89,11 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       this.files.set(fileId, new VfsFileState(path, slot, size, this.cacheBlocks));
       pOutFlags.setInt32(0, flags, true);
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jClose(fileId: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_CLOSE, async () => {
+    return this.measureSqlite("jClose", { fileId }, () => this.withError(VFS.SQLITE_IOERR_CLOSE, async () => {
       await this.prepareForUse();
 
       const file = this.getFile(fileId);
@@ -100,11 +102,11 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
       if (!this.hasOpenPersistentFiles()) await this.lease.release();
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jRead(fileId: number, out: Uint8Array, offset: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_READ, async () => {
+    return this.measureSqlite("jRead", { fileId, bytes: out.byteLength, offset }, () => this.withError(VFS.SQLITE_IOERR_READ, async () => {
       await this.prepareForUse();
 
       const file = this.getFile(fileId);
@@ -113,9 +115,10 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       if (offset >= file.size) return VFS.SQLITE_IOERR_SHORT_READ;
 
       const readable = Math.min(out.byteLength, file.size - offset);
+      const touchedBlocks = blocksTouched(offset, readable, GOOGLE_SHEETS_BLOCK_BYTES);
       let copied = 0;
 
-      for (const blockIndex of blocksTouched(offset, readable, GOOGLE_SHEETS_BLOCK_BYTES)) {
+      for (const blockIndex of touchedBlocks) {
         const block = await this.readVisibleBlock(file, blockIndex);
         const absolute = offset + copied;
         const start = absolute % GOOGLE_SHEETS_BLOCK_BYTES;
@@ -125,18 +128,20 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
         copied += bytesToCopy;
       }
 
+      this.emitMetric("vfs.read.blocks", true, 0, { fileId, bytes: readable, blocks: touchedBlocks.length });
       return readable < out.byteLength ? VFS.SQLITE_IOERR_SHORT_READ : VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jWrite(fileId: number, data: Uint8Array, offset: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_WRITE, async () => {
+    return this.measureSqlite("jWrite", { fileId, bytes: data.byteLength, offset }, () => this.withError(VFS.SQLITE_IOERR_WRITE, async () => {
       await this.prepareForUse();
 
       const file = this.getFile(fileId);
       if (file.isPersistent && !(await this.lease.acquire())) return VFS.SQLITE_BUSY;
 
       let written = 0;
+      let blocks = 0;
       const originalSize = file.size;
 
       while (written < data.byteLength) {
@@ -156,16 +161,18 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
         if (!writesFullBlock) block.set(source, start);
         file.markBlockDirty(blockIndex, block);
         written += bytesToWrite;
+        blocks++;
       }
 
       const nextSize = offset + data.byteLength;
       if (file.size < nextSize) file.markSize(nextSize);
+      this.emitMetric("vfs.write.blocks", true, 0, { fileId, bytes: data.byteLength, blocks });
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jTruncate(fileId: number, size: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_TRUNCATE, async () => {
+    return this.measureSqlite("jTruncate", { fileId, size }, () => this.withError(VFS.SQLITE_IOERR_TRUNCATE, async () => {
       await this.prepareForUse();
 
       const file = this.getFile(fileId);
@@ -174,44 +181,44 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       file.markSize(size);
       file.discardBlocksAtOrAfter(Math.ceil(size / GOOGLE_SHEETS_BLOCK_BYTES));
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jSync(fileId: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_FSYNC, async () => {
+    return this.measureSqlite("jSync", { fileId }, () => this.withError(VFS.SQLITE_IOERR_FSYNC, async () => {
       await this.prepareForUse();
       await this.flush(this.getFile(fileId));
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   jFileSize(fileId: number, pSize: DataView): SqliteResult {
-    return this.withSyncError(VFS.SQLITE_IOERR_FSTAT, () => {
+    return this.measureSyncSqlite("jFileSize", { fileId }, () => this.withSyncError(VFS.SQLITE_IOERR_FSTAT, () => {
       pSize.setBigInt64(0, BigInt(this.getFile(fileId).size), true);
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
-  async jLock(_fileId: number, _lockType: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_LOCK, async () => {
+  async jLock(_fileId: number, lockType: number): Promise<SqliteResult> {
+    return this.measureSqlite("jLock", { lockType }, () => this.withError(VFS.SQLITE_IOERR_LOCK, async () => {
       await this.prepareForUse();
       return await this.lease.acquire() ? VFS.SQLITE_OK : VFS.SQLITE_BUSY;
-    });
+    }));
   }
 
   async jUnlock(_fileId: number, lockType: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_UNLOCK, async () => {
+    return this.measureSqlite("jUnlock", { lockType }, () => this.withError(VFS.SQLITE_IOERR_UNLOCK, async () => {
       if (lockType === SQLITE_LOCK_NONE) {
         await this.flushDirtyPersistentFiles();
         this.scheduleReleaseSoon();
       }
 
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jAccess(filename: string, _flags: number, pResOut: DataView): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_ACCESS, async () => {
+    return this.measureSqlite("jAccess", {}, () => this.withError(VFS.SQLITE_IOERR_ACCESS, async () => {
       await this.prepareForUse();
 
       const slot = slotForPath(normalizePath(filename), this.mainPath);
@@ -223,11 +230,11 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       const metadata = await this.store.readMetadata(slot);
       pResOut.setInt32(0, metadata === null ? 0 : 1, true);
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jDelete(filename: string, _syncDir: number): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_DELETE, async () => {
+    return this.measureSqlite("jDelete", {}, () => this.withError(VFS.SQLITE_IOERR_DELETE, async () => {
       await this.prepareForUse();
 
       const path = normalizePath(filename);
@@ -238,35 +245,39 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       await this.store.deleteMetadata(slot, path);
       this.clearOpenFilesForSlot(slot);
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   async jCheckReservedLock(_fileId: number, pResOut: DataView): Promise<SqliteResult> {
-    return this.withError(VFS.SQLITE_IOERR_CHECKRESERVEDLOCK, async () => {
+    return this.measureSqlite("jCheckReservedLock", {}, () => this.withError(VFS.SQLITE_IOERR_CHECKRESERVEDLOCK, async () => {
       pResOut.setInt32(0, this.lease.isHeld ? 1 : 0, true);
       return VFS.SQLITE_OK;
-    });
+    }));
   }
 
   jSectorSize(): number {
+    this.emitMetric("jSectorSize", true, 0);
     return 512;
   }
 
   jDeviceCharacteristics(): number {
+    this.emitMetric("jDeviceCharacteristics", true, 0);
     return 0;
   }
 
   jGetLastError(zBuf: Uint8Array): SqliteResult {
-    if (this.lastError && zBuf.byteLength > 0) {
-      const text = this.lastError instanceof Error
-        ? this.lastError.stack ?? this.lastError.message
-        : String(this.lastError);
-      const out = zBuf.subarray(0, zBuf.byteLength - 1);
-      const { written } = new TextEncoder().encodeInto(text, out);
-      zBuf[written] = 0;
-    }
+    return this.measureSyncSqlite("jGetLastError", { bytes: zBuf.byteLength }, () => {
+      if (this.lastError && zBuf.byteLength > 0) {
+        const text = this.lastError instanceof Error
+          ? this.lastError.stack ?? this.lastError.message
+          : String(this.lastError);
+        const out = zBuf.subarray(0, zBuf.byteLength - 1);
+        const { written } = new TextEncoder().encodeInto(text, out);
+        zBuf[written] = 0;
+      }
 
-    return VFS.SQLITE_OK;
+      return VFS.SQLITE_OK;
+    });
   }
 
   private async openPersistentFile(slot: PersistentFileSlot, path: string, flags: number): Promise<number> {
@@ -281,36 +292,66 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   }
 
   private async readVisibleBlock(file: VfsFileState, blockIndex: number): Promise<Uint8Array> {
+    const startedAt = nowMs();
+    const detail = { file: file.path, slot: file.slot === null ? "temp" : file.slot, blockIndex };
     const dirty = file.dirtyBlocks.get(blockIndex);
-    if (dirty) return dirty.slice();
+    if (dirty) {
+      this.emitMetric("vfs.block.read", true, nowMs() - startedAt, { ...detail, source: "dirty" });
+      return dirty.slice();
+    }
 
     if (blockIndex * GOOGLE_SHEETS_BLOCK_BYTES >= file.size) {
+      this.emitMetric("vfs.block.read", true, nowMs() - startedAt, { ...detail, source: "zero" });
       return new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
     }
 
     if (file.slot === null) {
-      return file.tempBlocks.get(blockIndex)?.slice() ?? new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
+      const temp = file.tempBlocks.get(blockIndex)?.slice() ?? new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
+      this.emitMetric("vfs.block.read", true, nowMs() - startedAt, { ...detail, source: "temp" });
+      return temp;
     }
 
     const cached = file.cache.get(blockIndex);
-    if (cached) return cached;
+    if (cached) {
+      this.emitMetric("vfs.block.read", true, nowMs() - startedAt, { ...detail, source: "cache" });
+      return cached;
+    }
 
     const block = await this.store.readBlock(file.slot, blockIndex);
     file.cache.set(blockIndex, block);
+    this.emitMetric("vfs.block.read", true, nowMs() - startedAt, { ...detail, source: "sheets" });
     return block;
   }
 
   private async flush(file: VfsFileState): Promise<void> {
-    if (!file.dirtySize && file.dirtyBlocks.size === 0) return;
+    const startedAt = nowMs();
+    const detail = {
+      file: file.path,
+      slot: file.slot === null ? "temp" : file.slot,
+      dirtyBlocks: file.dirtyBlocks.size,
+      dirtySize: file.dirtySize !== null,
+    };
 
-    if (file.slot === null) {
+    try {
+      if (!file.dirtySize && file.dirtyBlocks.size === 0) {
+        this.emitMetric("vfs.flush", true, nowMs() - startedAt, { ...detail, noop: true });
+        return;
+      }
+
+      if (file.slot === null) {
+        file.finishFlush();
+        this.emitMetric("vfs.flush", true, nowMs() - startedAt, { ...detail, temp: true });
+        return;
+      }
+
+      if (!(await this.lease.acquire())) throw new BusyError("Could not acquire Google Sheets VFS lease while flushing file");
+      await this.store.writeBlocksAndMetadata(file.slot, file.path, file.size, file.dirtyBlocks);
       file.finishFlush();
-      return;
+      this.emitMetric("vfs.flush", true, nowMs() - startedAt, detail);
+    } catch (error) {
+      this.emitMetric("vfs.flush", false, nowMs() - startedAt, detail);
+      throw error;
     }
-
-    if (!(await this.lease.acquire())) throw new BusyError("Could not acquire Google Sheets VFS lease while flushing file");
-    await this.store.writeBlocksAndMetadata(file.slot, file.path, file.size, file.dirtyBlocks);
-    file.finishFlush();
   }
 
   private async flushDirtyPersistentFiles(): Promise<void> {
@@ -364,7 +405,14 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   private async releaseForGeneration(generation: number): Promise<void> {
     if (generation !== this.releaseGeneration) return;
-    await this.lease.release();
+    const startedAt = nowMs();
+    try {
+      await this.lease.release();
+      this.emitMetric("vfs.lease.release", true, nowMs() - startedAt, { scheduled: true });
+    } catch (error) {
+      this.emitMetric("vfs.lease.release", false, nowMs() - startedAt, { scheduled: true });
+      throw error;
+    }
   }
 
   private getFile(fileId: number): VfsFileState {
@@ -404,6 +452,38 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       return fallback;
     }
   }
+
+  private async measureSqlite(name: string, detail: GoogleSheetsVFSMetricDetail, operation: () => Promise<SqliteResult>): Promise<SqliteResult> {
+    const startedAt = nowMs();
+    try {
+      const result = await operation();
+      this.emitMetric(name, result === VFS.SQLITE_OK || (name === "jRead" && result === VFS.SQLITE_IOERR_SHORT_READ), nowMs() - startedAt, { ...detail, result });
+      return result;
+    } catch (error) {
+      this.emitMetric(name, false, nowMs() - startedAt, detail);
+      throw error;
+    }
+  }
+
+  private measureSyncSqlite(name: string, detail: GoogleSheetsVFSMetricDetail, operation: () => SqliteResult): SqliteResult {
+    const startedAt = nowMs();
+    try {
+      const result = operation();
+      this.emitMetric(name, result === VFS.SQLITE_OK, nowMs() - startedAt, { ...detail, result });
+      return result;
+    } catch (error) {
+      this.emitMetric(name, false, nowMs() - startedAt, detail);
+      throw error;
+    }
+  }
+
+  private emitMetric(name: string, ok: boolean, durationMs: number, detail?: GoogleSheetsVFSMetricDetail): void {
+    try {
+      this.metrics?.onEvent?.({ name, ok, durationMs, detail });
+    } catch {
+      // Metrics must never affect SQLite behavior.
+    }
+  }
 }
 
 class BusyError extends Error {}
@@ -418,4 +498,8 @@ function validateNonNegativeInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new RangeError(`${name} must be a non-negative integer, got ${value}`);
   }
+}
+
+function nowMs(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
