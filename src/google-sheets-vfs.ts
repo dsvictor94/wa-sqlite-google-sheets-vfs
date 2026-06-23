@@ -29,9 +29,9 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private readonly files = new Map<number, VfsFileState>();
   private mainPath: string | null = null;
   private lastError: unknown = null;
-  private flushReleaseTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
-  private flushReleaseGeneration = 0;
-  private pendingFlushRelease: Promise<void> | null = null;
+  private releaseTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  private releaseGeneration = 0;
+  private pendingRelease: Promise<void> | null = null;
 
   static async create(name: string, module: unknown, options: GoogleSheetsVFSOptions): Promise<GoogleSheetsSQLiteVFS> {
     const vfs = new GoogleSheetsSQLiteVFS(name, module, options);
@@ -201,7 +201,11 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jUnlock(_fileId: number, lockType: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_UNLOCK, async () => {
-      if (lockType === SQLITE_LOCK_NONE) this.scheduleFlushAndReleaseSoon();
+      if (lockType === SQLITE_LOCK_NONE) {
+        await this.flushDirtyPersistentFiles();
+        this.scheduleReleaseSoon();
+      }
+
       return VFS.SQLITE_OK;
     });
   }
@@ -309,57 +313,57 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     file.finishFlush();
   }
 
-  private async prepareForUse(): Promise<void> {
-    this.cancelScheduledFlushAndRelease();
+  private async flushDirtyPersistentFiles(): Promise<void> {
+    for (const file of this.files.values()) {
+      if (file.isPersistent) await this.flush(file);
+    }
+  }
 
-    const pending = this.pendingFlushRelease;
+  private async prepareForUse(): Promise<void> {
+    this.cancelScheduledRelease();
+
+    const pending = this.pendingRelease;
     if (pending !== null) await pending;
   }
 
-  private scheduleFlushAndReleaseSoon(): void {
-    this.cancelScheduledFlushAndRelease();
-    const generation = this.flushReleaseGeneration;
+  private scheduleReleaseSoon(): void {
+    this.cancelScheduledRelease();
+    const generation = this.releaseGeneration;
 
     if (this.lockReleaseDelayMs <= 0) {
-      this.startFlushAndRelease(generation);
+      this.startRelease(generation);
       return;
     }
 
-    this.flushReleaseTimer = globalThis.setTimeout(() => {
-      this.flushReleaseTimer = undefined;
-      this.startFlushAndRelease(generation);
+    this.releaseTimer = globalThis.setTimeout(() => {
+      this.releaseTimer = undefined;
+      this.startRelease(generation);
     }, this.lockReleaseDelayMs);
   }
 
-  private cancelScheduledFlushAndRelease(): void {
-    this.flushReleaseGeneration++;
+  private cancelScheduledRelease(): void {
+    this.releaseGeneration++;
 
-    if (this.flushReleaseTimer === undefined) return;
-    globalThis.clearTimeout(this.flushReleaseTimer);
-    this.flushReleaseTimer = undefined;
+    if (this.releaseTimer === undefined) return;
+    globalThis.clearTimeout(this.releaseTimer);
+    this.releaseTimer = undefined;
   }
 
-  private startFlushAndRelease(generation: number): void {
-    const pending = this.flushAllAndReleaseForGeneration(generation);
-    this.pendingFlushRelease = pending;
+  private startRelease(generation: number): void {
+    const pending = this.releaseForGeneration(generation);
+    this.pendingRelease = pending;
 
     void pending
       .catch((error) => {
         this.lastError = error;
       })
       .finally(() => {
-        if (this.pendingFlushRelease === pending) this.pendingFlushRelease = null;
+        if (this.pendingRelease === pending) this.pendingRelease = null;
       });
   }
 
-  private async flushAllAndReleaseForGeneration(generation: number): Promise<void> {
-    if (generation !== this.flushReleaseGeneration) return;
-
-    for (const file of this.files.values()) {
-      await this.flush(file);
-      if (generation !== this.flushReleaseGeneration) return;
-    }
-
+  private async releaseForGeneration(generation: number): Promise<void> {
+    if (generation !== this.releaseGeneration) return;
     await this.lease.release();
   }
 
