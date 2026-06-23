@@ -1,3 +1,16 @@
+export type GoogleSheetsVFSMetricDetail = Record<string, string | number | boolean | null | undefined>;
+
+export type GoogleSheetsVFSMetricEvent = {
+  name: string;
+  ok: boolean;
+  durationMs: number;
+  detail?: GoogleSheetsVFSMetricDetail;
+};
+
+export type GoogleSheetsVFSMetrics = {
+  onEvent?: (event: GoogleSheetsVFSMetricEvent) => void;
+};
+
 export type GoogleSheetsVFSOptions = {
   spreadsheetId: string;
   lockSheetName?: string;
@@ -10,6 +23,7 @@ export type GoogleSheetsVFSOptions = {
   leaseMs?: number;
   lockTimeoutMs?: number;
   lockReleaseDelayMs?: number;
+  metrics?: GoogleSheetsVFSMetrics;
 };
 
 export type GoogleBrowserSheetsConfig = {

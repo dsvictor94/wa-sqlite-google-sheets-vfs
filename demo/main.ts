@@ -9,6 +9,11 @@ declare const google: any;
 type LogLevel = "info" | "ok" | "error";
 type ActiveDatabase = { db: unknown; spreadsheetId: string; spreadsheetUrl: string };
 type ResultSet = { columns: string[]; rows: Array<Record<string, unknown>> };
+type VfsMetricEvent = { name: string; ok: boolean; durationMs: number; detail?: Record<string, string | number | boolean | null | undefined> };
+type MetricSummary = { name: string; count: number; ok: number; failed: number; totalMs: number; maxMs: number; bytes: number; blocks: number; dirtyBlocks: number };
+type MetricSnapshot = { events: number; totalMs: number; operations: MetricSummary[]; blockSources: Record<string, number> };
+type BenchmarkScenario = { id: string; title: string; description: string; sql: string };
+type BenchmarkRun = { title: string; durationMs: number; snapshot: MetricSnapshot; at: Date };
 
 const env = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {});
 const GOOGLE_CLIENT_ID = requiredEnv("VITE_GOOGLE_CLIENT_ID");
@@ -36,6 +41,98 @@ SELECT id, message, created_at
 FROM notes
 ORDER BY id DESC
 LIMIT 10;`;
+
+const AUTOCOMMIT_INSERTS = Array.from({ length: 10 }, (_, index) =>
+  `INSERT INTO bench_notes(label, payload) VALUES ('autocommit-10', 'row-${index + 1}-' || hex(randomblob(96)));`,
+).join("\n");
+
+const BENCHMARKS: BenchmarkScenario[] = [
+  {
+    id: "setup",
+    title: "Setup benchmark table",
+    description: "Creates the benchmark table if it does not exist.",
+    sql: `CREATE TABLE IF NOT EXISTS bench_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+SELECT COUNT(*) AS rows FROM bench_notes;`,
+  },
+  {
+    id: "autocommit-10",
+    title: "10 autocommit inserts",
+    description: "Runs ten independent INSERT statements to expose lock/unlock overhead.",
+    sql: `CREATE TABLE IF NOT EXISTS bench_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+${AUTOCOMMIT_INSERTS}
+SELECT COUNT(*) AS rows FROM bench_notes;`,
+  },
+  {
+    id: "tx-100",
+    title: "100 inserts in one transaction",
+    description: "Writes 100 rows inside BEGIN IMMEDIATE / COMMIT.",
+    sql: `CREATE TABLE IF NOT EXISTS bench_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+BEGIN IMMEDIATE;
+WITH RECURSIVE seq(n) AS (
+  VALUES(1)
+  UNION ALL
+  SELECT n + 1 FROM seq WHERE n < 100
+)
+INSERT INTO bench_notes(label, payload)
+SELECT 'tx-100', printf('row-%03d-', n) || hex(randomblob(128))
+FROM seq;
+COMMIT;
+SELECT COUNT(*) AS rows, MAX(id) AS latest_id FROM bench_notes;`,
+  },
+  {
+    id: "read-latest",
+    title: "Read latest 100 rows",
+    description: "Reads recent rows and is useful to compare cold vs warm cache behavior.",
+    sql: `SELECT id, label, length(payload) AS payload_bytes, created_at
+FROM bench_notes
+ORDER BY id DESC
+LIMIT 100;`,
+  },
+  {
+    id: "aggregate",
+    title: "Aggregate benchmark rows",
+    description: "Runs GROUP BY / ORDER BY over the benchmark table.",
+    sql: `SELECT label, COUNT(*) AS rows, AVG(length(payload)) AS avg_payload_bytes
+FROM bench_notes
+GROUP BY label
+ORDER BY rows DESC, label ASC;`,
+  },
+  {
+    id: "update-50",
+    title: "Update latest 50 rows",
+    description: "Updates recent rows inside one transaction.",
+    sql: `BEGIN IMMEDIATE;
+UPDATE bench_notes
+SET payload = payload || '-updated'
+WHERE id IN (
+  SELECT id FROM bench_notes ORDER BY id DESC LIMIT 50
+);
+COMMIT;
+SELECT COUNT(*) AS rows FROM bench_notes;`,
+  },
+  {
+    id: "reset",
+    title: "Reset benchmark table",
+    description: "Drops the benchmark table so the next benchmark starts clean.",
+    sql: `DROP TABLE IF EXISTS bench_notes;
+SELECT 'bench_notes reset' AS status;`,
+  },
+];
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing #app element");
@@ -82,7 +179,17 @@ app.innerHTML = `
       <textarea id="sql-editor" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
     </section>
 
+    <section class="card">
+      <h2>4. Benchmarks</h2>
+      <p class="hint">Run predefined scenarios and compare SQL duration, VFS calls, block reads, dirty flushes, and cache behavior.</p>
+      <div class="actions benchmark-actions">
+        ${BENCHMARKS.map((scenario) => `<button type="button" class="secondary" data-benchmark="${escapeAttr(scenario.id)}" title="${escapeAttr(scenario.description)}">${escapeHtml(scenario.title)}</button>`).join("")}
+      </div>
+    </section>
+
     <section id="query-results" class="card result" hidden></section>
+    <section id="vfs-metrics" class="card result" hidden></section>
+    <section id="benchmark-results" class="card result" hidden></section>
     <section class="card"><h2>Status</h2><ol id="log" class="log"></ol></section>
   </main>`;
 
@@ -100,13 +207,18 @@ const runButton = $<HTMLButtonElement>("#run-sql");
 const resetButton = $<HTMLButtonElement>("#reset-sql");
 const clearButton = $<HTMLButtonElement>("#clear-results");
 const results = $<HTMLElement>("#query-results");
+const metricsPanel = $<HTMLElement>("#vfs-metrics");
+const benchmarkResults = $<HTMLElement>("#benchmark-results");
 const logList = $<HTMLOListElement>("#log");
+const benchmarkButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-benchmark]"));
 
 let auth: GoogleBrowserAuth | undefined;
 let sqliteModule: unknown;
 let sqlite3: any;
 let db: ActiveDatabase | undefined;
 let busy = false;
+let benchmarkHistory: BenchmarkRun[] = [];
+const vfsMetrics = createVfsMetricsCollector();
 
 sqlEditor.value = DEFAULT_SQL;
 configHint.textContent = "Google credentials are configured from required build-time VITE_* variables.";
@@ -145,7 +257,19 @@ openForm.addEventListener("submit", (event) => {
 
 runButton.addEventListener("click", () => runTask(runSql));
 resetButton.addEventListener("click", () => { sqlEditor.value = DEFAULT_SQL; sqlEditor.focus(); });
-clearButton.addEventListener("click", () => { results.hidden = true; results.innerHTML = ""; });
+clearButton.addEventListener("click", () => {
+  results.hidden = true;
+  results.innerHTML = "";
+  metricsPanel.hidden = true;
+  metricsPanel.innerHTML = "";
+});
+for (const button of benchmarkButtons) {
+  button.addEventListener("click", () => {
+    const benchmarkId = button.dataset.benchmark;
+    if (!benchmarkId) return;
+    void runTask(() => runBenchmark(benchmarkId));
+  });
+}
 sqlEditor.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
@@ -191,7 +315,7 @@ async function openSpreadsheet(spreadsheetId: string, spreadsheetLink: string): 
   if (db && sqlite3) await sqlite3.close(db.db);
   const { module, sqlite } = await loadSqlite();
   const vfsName = `google-sheets-${Date.now().toString(36)}`;
-  const vfs = await GoogleSheetsSQLiteVFS.create(vfsName, module, { spreadsheetId, databaseId: DB_ID, lockTimeoutMs: 15_000 });
+  const vfs = await GoogleSheetsSQLiteVFS.create(vfsName, module, { spreadsheetId, databaseId: DB_ID, lockTimeoutMs: 15_000, metrics: vfsMetrics });
   sqlite.vfs_register(vfs, true);
 
   log("Opening SQLite database through the VFS", "info");
@@ -222,11 +346,35 @@ async function runSql(): Promise<void> {
   const sql = sqlEditor.value.trim();
   if (!sql) throw new Error("Write a SQL statement before running it.");
 
+  log("Running SQL", "info");
+  const { resultSets, durationMs, snapshot } = await executeMeasuredSql(sql);
+  log(`SQL executed in ${formatDuration(durationMs)}`, "ok");
+  renderResults(resultSets, durationMs, "SQL editor result");
+  renderVfsMetrics("SQL editor", durationMs, snapshot);
+}
+
+async function runBenchmark(benchmarkId: string): Promise<void> {
+  if (!db) throw new Error("Choose or create a spreadsheet before running benchmarks.");
+  const scenario = BENCHMARKS.find((candidate) => candidate.id === benchmarkId);
+  if (!scenario) throw new Error(`Unknown benchmark scenario: ${benchmarkId}`);
+
+  log(`Running benchmark: ${scenario.title}`, "info");
+  const { resultSets, durationMs, snapshot } = await executeMeasuredSql(scenario.sql);
+  log(`Benchmark ${scenario.title} completed in ${formatDuration(durationMs)}`, "ok");
+  renderResults(resultSets, durationMs, scenario.title);
+  renderVfsMetrics(`Benchmark: ${scenario.title}`, durationMs, snapshot);
+  benchmarkHistory = [{ title: scenario.title, durationMs, snapshot, at: new Date() }, ...benchmarkHistory].slice(0, 20);
+  renderBenchmarkHistory();
+}
+
+async function executeMeasuredSql(sql: string): Promise<{ resultSets: ResultSet[]; durationMs: number; snapshot: MetricSnapshot }> {
+  if (!db) throw new Error("Choose or create a spreadsheet before running SQL.");
+
+  vfsMetrics.reset();
   const resultSets: ResultSet[] = [];
   let active: ResultSet | undefined;
   let activeKey = "";
   const startedAt = performance.now();
-  log("Running SQL", "info");
 
   await sqlite3.exec(db.db, sql, (row: unknown[], columns: string[]) => {
     const names = columns.map(String);
@@ -240,8 +388,7 @@ async function runSql(): Promise<void> {
   });
 
   const durationMs = performance.now() - startedAt;
-  log(`SQL executed in ${formatDuration(durationMs)}`, "ok");
-  renderResults(resultSets, durationMs);
+  return { resultSets, durationMs, snapshot: vfsMetrics.snapshot() };
 }
 
 async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUrl: string } | undefined> {
@@ -274,6 +421,49 @@ async function pickSpreadsheet(): Promise<{ spreadsheetId: string; spreadsheetUr
   });
 }
 
+function createVfsMetricsCollector(): { onEvent: (event: VfsMetricEvent) => void; reset: () => void; snapshot: () => MetricSnapshot } {
+  let events: VfsMetricEvent[] = [];
+
+  return {
+    onEvent(event) {
+      events.push(event);
+      if (events.length > 10_000) events = events.slice(-10_000);
+    },
+    reset() {
+      events = [];
+    },
+    snapshot() {
+      const byName = new Map<string, MetricSummary>();
+      const blockSources: Record<string, number> = {};
+
+      for (const event of events) {
+        const summary = byName.get(event.name) ?? { name: event.name, count: 0, ok: 0, failed: 0, totalMs: 0, maxMs: 0, bytes: 0, blocks: 0, dirtyBlocks: 0 };
+        summary.count++;
+        summary.totalMs += event.durationMs;
+        summary.maxMs = Math.max(summary.maxMs, event.durationMs);
+        if (event.ok) summary.ok++; else summary.failed++;
+
+        const detail = event.detail ?? {};
+        summary.bytes += numericDetail(detail.bytes);
+        summary.blocks += numericDetail(detail.blocks);
+        summary.dirtyBlocks += numericDetail(detail.dirtyBlocks);
+        byName.set(event.name, summary);
+
+        if (event.name === "vfs.block.read" && typeof detail.source === "string") {
+          blockSources[detail.source] = (blockSources[detail.source] ?? 0) + 1;
+        }
+      }
+
+      const operations = Array.from(byName.values()).sort((left, right) => right.totalMs - left.totalMs || right.count - left.count);
+      return { events: events.length, totalMs: operations.reduce((sum, item) => sum + item.totalMs, 0), operations, blockSources };
+    },
+  };
+}
+
+function numericDetail(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 function requiredEnv(name: string): string {
   const value = env[name]!;
   if (!value) throw new Error(`Missing required environment variable: ${name}`);
@@ -303,17 +493,61 @@ function renderDatabaseStatus(): void {
   updateControls();
 }
 
-function renderResults(resultSets: ResultSet[], durationMs: number): void {
+function renderResults(resultSets: ResultSet[], durationMs: number, title = "Result"): void {
   results.hidden = false;
   if (!resultSets.length) {
-    results.innerHTML = `<h2>Result</h2><p class="status-ok">Query executed successfully in ${escapeHtml(formatDuration(durationMs))}. No rows were returned.</p>`;
+    results.innerHTML = `<h2>${escapeHtml(title)}</h2><p class="status-ok">Query executed successfully in ${escapeHtml(formatDuration(durationMs))}. No rows were returned.</p>`;
     return;
   }
-  results.innerHTML = `<h2>Result</h2><p class="muted">${resultSets.length} result set${resultSets.length === 1 ? "" : "s"} returned in ${escapeHtml(formatDuration(durationMs))}.</p>${resultSets.map(renderSet).join("")}`;
+  results.innerHTML = `<h2>${escapeHtml(title)}</h2><p class="muted">${resultSets.length} result set${resultSets.length === 1 ? "" : "s"} returned in ${escapeHtml(formatDuration(durationMs))}.</p>${resultSets.map(renderSet).join("")}`;
 }
 
 function renderSet(set: ResultSet, index: number): string {
   return `<section class="result-set"><h3>Result set ${index + 1} <span>${set.rows.length} row${set.rows.length === 1 ? "" : "s"}</span></h3><div class="table-wrap"><table><thead><tr>${set.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead><tbody>${set.rows.map((row) => `<tr>${set.columns.map((column) => `<td>${escapeHtml(formatCell(row[column]))}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>`;
+}
+
+function renderVfsMetrics(label: string, sqlDurationMs: number, snapshot: MetricSnapshot): void {
+  metricsPanel.hidden = false;
+  const remoteReads = snapshot.blockSources.sheets ?? 0;
+  const cacheReads = snapshot.blockSources.cache ?? 0;
+  const dirtyReads = snapshot.blockSources.dirty ?? 0;
+  const topOperations = snapshot.operations.slice(0, 16);
+
+  metricsPanel.innerHTML = `
+    <h2>VFS metrics: ${escapeHtml(label)}</h2>
+    <p class="muted">SQL duration: ${escapeHtml(formatDuration(sqlDurationMs))}. Captured ${snapshot.events} VFS metric event${snapshot.events === 1 ? "" : "s"}.</p>
+    <div class="table-wrap"><table><tbody>
+      <tr><th>Total measured VFS time</th><td>${escapeHtml(formatDuration(snapshot.totalMs))}</td></tr>
+      <tr><th>Remote block reads</th><td>${remoteReads}</td></tr>
+      <tr><th>Cache block reads</th><td>${cacheReads}</td></tr>
+      <tr><th>Dirty block reads</th><td>${dirtyReads}</td></tr>
+    </tbody></table></div>
+    <section class="result-set">
+      <h3>Operation breakdown <span>${snapshot.operations.length} operation type${snapshot.operations.length === 1 ? "" : "s"}</span></h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Operation</th><th>Calls</th><th>Total</th><th>Avg</th><th>Max</th><th>Bytes</th><th>Blocks</th><th>Dirty blocks</th><th>Failures</th></tr></thead>
+        <tbody>${topOperations.map(renderMetricRow).join("")}</tbody>
+      </table></div>
+    </section>`;
+}
+
+function renderMetricRow(summary: MetricSummary): string {
+  const avgMs = summary.count === 0 ? 0 : summary.totalMs / summary.count;
+  return `<tr><td>${escapeHtml(summary.name)}</td><td>${summary.count}</td><td>${escapeHtml(formatDuration(summary.totalMs))}</td><td>${escapeHtml(formatDuration(avgMs))}</td><td>${escapeHtml(formatDuration(summary.maxMs))}</td><td>${summary.bytes || ""}</td><td>${summary.blocks || ""}</td><td>${summary.dirtyBlocks || ""}</td><td>${summary.failed || ""}</td></tr>`;
+}
+
+function renderBenchmarkHistory(): void {
+  benchmarkResults.hidden = benchmarkHistory.length === 0;
+  if (!benchmarkHistory.length) return;
+  benchmarkResults.innerHTML = `<h2>Benchmark history</h2><div class="table-wrap"><table>
+    <thead><tr><th>When</th><th>Scenario</th><th>SQL time</th><th>VFS time</th><th>Events</th><th>Remote reads</th><th>Flush calls</th></tr></thead>
+    <tbody>${benchmarkHistory.map(renderBenchmarkRun).join("")}</tbody>
+  </table></div>`;
+}
+
+function renderBenchmarkRun(run: BenchmarkRun): string {
+  const flushCalls = run.snapshot.operations.find((operation) => operation.name === "vfs.flush")?.count ?? 0;
+  return `<tr><td>${escapeHtml(run.at.toLocaleTimeString())}</td><td>${escapeHtml(run.title)}</td><td>${escapeHtml(formatDuration(run.durationMs))}</td><td>${escapeHtml(formatDuration(run.snapshot.totalMs))}</td><td>${run.snapshot.events}</td><td>${run.snapshot.blockSources.sheets ?? 0}</td><td>${flushCalls}</td></tr>`;
 }
 
 function renderError(message: string): void {
@@ -338,6 +572,7 @@ function updateControls(): void {
   runButton.disabled = busy || !db;
   resetButton.disabled = busy;
   clearButton.disabled = busy;
+  for (const button of benchmarkButtons) button.disabled = busy || !db;
 }
 
 function formatError(error: unknown): string {
