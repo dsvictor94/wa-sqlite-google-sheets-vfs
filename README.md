@@ -115,14 +115,28 @@ The default block tab is `__sqlite_blocks`. Rows 2-5 store file metadata. Block 
 
 ## Usage notes
 
-Use rollback journal mode:
+For durable commits, use rollback journal mode with synchronous `FULL` or `EXTRA`:
 
 ```sql
 PRAGMA journal_mode=DELETE;
 PRAGMA synchronous=FULL;
 ```
 
+`EXTRA` is also acceptable, but it is not expected to add meaningful protection for this Sheets-backed VFS because there is no filesystem directory to sync after deleting the rollback journal.
+
+A SQL transaction that commits successfully is expected to be durable only when SQLite reaches the rollback-journal commit path and its required `xSync` calls succeed. Do not use `synchronous=NORMAL` or `synchronous=OFF` if your application requires a successful SQL `COMMIT` to be durable after a browser reload, tab close, network failure, or process crash.
+
 Do not use WAL unless shared-memory semantics are added to the VFS.
+
+For multi-statement writes, prefer an explicit transaction so SQLite does not perform a full lock/unlock cycle for every individual statement:
+
+```sql
+BEGIN IMMEDIATE;
+-- related writes
+COMMIT;
+```
+
+The VFS keeps multi-user safety by holding the Google Sheets lease while the connection is active. After SQLite unlocks to `SQLITE_LOCK_NONE`, the VFS flushes any remaining persistent dirty state before returning from unlock, then waits for `lockReleaseDelayMs` before releasing the lease. If SQLite uses the VFS again before that delay expires, the scheduled release is canceled. This coalesces short lock/unlock bursts without allowing another browser to acquire the spreadsheet before pending data is flushed.
 
 ## Browser usage
 

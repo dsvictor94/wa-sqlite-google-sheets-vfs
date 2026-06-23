@@ -3,6 +3,7 @@ import * as VFS from "wa-sqlite/src/VFS.js";
 import {
   DEFAULT_BLOCKS_PER_STRIPE,
   DEFAULT_CACHE_BLOCKS,
+  DEFAULT_LOCK_RELEASE_DELAY_MS,
   DEFAULT_STRIPES_PER_FILE,
   GOOGLE_SHEETS_BLOCK_BYTES,
   PersistentFileSlot,
@@ -24,9 +25,13 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private readonly store: GoogleSheetsBlockStore;
   private readonly lease: GoogleSheetsLease;
   private readonly cacheBlocks: number;
+  private readonly lockReleaseDelayMs: number;
   private readonly files = new Map<number, VfsFileState>();
   private mainPath: string | null = null;
   private lastError: unknown = null;
+  private releaseTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  private releaseGeneration = 0;
+  private pendingRelease: Promise<void> | null = null;
 
   static async create(name: string, module: unknown, options: GoogleSheetsVFSOptions): Promise<GoogleSheetsSQLiteVFS> {
     const vfs = new GoogleSheetsSQLiteVFS(name, module, options);
@@ -43,12 +48,15 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
     const blocksPerStripe = options.blocksPerStripe ?? DEFAULT_BLOCKS_PER_STRIPE;
     const stripesPerFile = options.stripesPerFile ?? DEFAULT_STRIPES_PER_FILE;
+    const lockReleaseDelayMs = options.lockReleaseDelayMs ?? DEFAULT_LOCK_RELEASE_DELAY_MS;
 
     validatePositiveInteger("blocksPerStripe", blocksPerStripe);
     validatePositiveInteger("stripesPerFile", stripesPerFile);
+    validateNonNegativeInteger("lockReleaseDelayMs", lockReleaseDelayMs);
 
     this.client = new GoogleSdkSheetsClient(options.spreadsheetId);
     this.cacheBlocks = options.cacheBlocks ?? DEFAULT_CACHE_BLOCKS;
+    this.lockReleaseDelayMs = lockReleaseDelayMs;
     this.store = new GoogleSheetsBlockStore(this.client, {
       blockSheetName: options.blockSheetName,
       blocksPerStripe,
@@ -69,6 +77,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jOpen(name: string | null, fileId: number, flags: number, pOutFlags: DataView): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_CANTOPEN, async () => {
+      await this.prepareForUse();
+
       const path = normalizePath(name);
       const slot = slotForOpen(path, flags);
       if (flags & VFS.SQLITE_OPEN_MAIN_DB) this.mainPath = path;
@@ -82,6 +92,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jClose(fileId: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_CLOSE, async () => {
+      await this.prepareForUse();
+
       const file = this.getFile(fileId);
       await this.flush(file);
       this.files.delete(fileId);
@@ -93,6 +105,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jRead(fileId: number, out: Uint8Array, offset: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_READ, async () => {
+      await this.prepareForUse();
+
       const file = this.getFile(fileId);
       out.fill(0);
 
@@ -117,6 +131,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jWrite(fileId: number, data: Uint8Array, offset: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_WRITE, async () => {
+      await this.prepareForUse();
+
       const file = this.getFile(fileId);
       if (file.isPersistent && !(await this.lease.acquire())) return VFS.SQLITE_BUSY;
 
@@ -150,6 +166,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jTruncate(fileId: number, size: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_TRUNCATE, async () => {
+      await this.prepareForUse();
+
       const file = this.getFile(fileId);
       if (file.isPersistent && !(await this.lease.acquire())) return VFS.SQLITE_BUSY;
 
@@ -161,6 +179,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jSync(fileId: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_FSYNC, async () => {
+      await this.prepareForUse();
       await this.flush(this.getFile(fileId));
       return VFS.SQLITE_OK;
     });
@@ -175,6 +194,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jLock(_fileId: number, _lockType: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_LOCK, async () => {
+      await this.prepareForUse();
       return await this.lease.acquire() ? VFS.SQLITE_OK : VFS.SQLITE_BUSY;
     });
   }
@@ -182,8 +202,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   async jUnlock(_fileId: number, lockType: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_UNLOCK, async () => {
       if (lockType === SQLITE_LOCK_NONE) {
-        for (const file of this.files.values()) await this.flush(file);
-        await this.lease.releaseSoon();
+        await this.flushDirtyPersistentFiles();
+        this.scheduleReleaseSoon();
       }
 
       return VFS.SQLITE_OK;
@@ -192,6 +212,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jAccess(filename: string, _flags: number, pResOut: DataView): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_ACCESS, async () => {
+      await this.prepareForUse();
+
       const slot = slotForPath(normalizePath(filename), this.mainPath);
       if (slot === null) {
         pResOut.setInt32(0, 0, true);
@@ -206,6 +228,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jDelete(filename: string, _syncDir: number): Promise<SqliteResult> {
     return this.withError(VFS.SQLITE_IOERR_DELETE, async () => {
+      await this.prepareForUse();
+
       const path = normalizePath(filename);
       const slot = slotForPath(path, this.mainPath);
       if (slot === null) return VFS.SQLITE_OK;
@@ -289,6 +313,60 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     file.finishFlush();
   }
 
+  private async flushDirtyPersistentFiles(): Promise<void> {
+    for (const file of this.files.values()) {
+      if (file.isPersistent) await this.flush(file);
+    }
+  }
+
+  private async prepareForUse(): Promise<void> {
+    this.cancelScheduledRelease();
+
+    const pending = this.pendingRelease;
+    if (pending !== null) await pending;
+  }
+
+  private scheduleReleaseSoon(): void {
+    this.cancelScheduledRelease();
+    const generation = this.releaseGeneration;
+
+    if (this.lockReleaseDelayMs <= 0) {
+      this.startRelease(generation);
+      return;
+    }
+
+    this.releaseTimer = globalThis.setTimeout(() => {
+      this.releaseTimer = undefined;
+      this.startRelease(generation);
+    }, this.lockReleaseDelayMs);
+  }
+
+  private cancelScheduledRelease(): void {
+    this.releaseGeneration++;
+
+    if (this.releaseTimer === undefined) return;
+    globalThis.clearTimeout(this.releaseTimer);
+    this.releaseTimer = undefined;
+  }
+
+  private startRelease(generation: number): void {
+    const pending = this.releaseForGeneration(generation);
+    this.pendingRelease = pending;
+
+    void pending
+      .catch((error) => {
+        this.lastError = error;
+      })
+      .finally(() => {
+        if (this.pendingRelease === pending) this.pendingRelease = null;
+      });
+  }
+
+  private async releaseForGeneration(generation: number): Promise<void> {
+    if (generation !== this.releaseGeneration) return;
+    await this.lease.release();
+  }
+
   private getFile(fileId: number): VfsFileState {
     const file = this.files.get(fileId);
     if (!file) throw new Error(`Unknown SQLite file id ${fileId}`);
@@ -333,5 +411,11 @@ class BusyError extends Error {}
 function validatePositiveInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new RangeError(`${name} must be a positive integer, got ${value}`);
+  }
+}
+
+function validateNonNegativeInteger(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative integer, got ${value}`);
   }
 }
