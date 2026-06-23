@@ -19,6 +19,9 @@ const DB_ID = "sql-editor-demo";
 const SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet";
 
 const DEFAULT_SQL = `-- Run any SQLite statement supported by wa-sqlite.
+-- Group related writes in an explicit transaction to avoid one lock/unlock cycle per statement.
+BEGIN IMMEDIATE;
+
 CREATE TABLE IF NOT EXISTS notes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   message TEXT NOT NULL,
@@ -26,6 +29,8 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 
 INSERT INTO notes(message) VALUES ('Hello from the Google Sheets VFS');
+
+COMMIT;
 
 SELECT id, message, created_at
 FROM notes
@@ -196,7 +201,7 @@ async function openSpreadsheet(spreadsheetId: string, spreadsheetLink: string): 
     spreadsheetUrl: spreadsheetLink,
   };
   spreadsheetInput.value = spreadsheetId;
-  await sqlite.exec(db.db, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;");
+  await sqlite.exec(db.db, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA temp_store=MEMORY;");
   log("SQLite database ready", "ok");
   renderDatabaseStatus();
   results.hidden = false;
