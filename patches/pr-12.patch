@@ -1,0 +1,8 @@
+# PR 12 patch pointer
+
+source: https://github.com/dsvictor94/wa-sqlite-google-sheets-vfs/pull/12.diff
+base: c3bce934b3eff84fe987755e57c4d2921f06c007
+head: 14cb5bc51cf35dd6a08df66fe9b772e185359c74
+
+apply:
+  curl -L https://github.com/dsvictor94/wa-sqlite-google-sheets-vfs/pull/12.diff | git apply
