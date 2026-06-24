@@ -57,7 +57,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     validatePositiveInteger("stripesPerFile", stripesPerFile);
     validateNonNegativeInteger("lockReleaseDelayMs", lockReleaseDelayMs);
 
-    this.client = new GoogleSdkSheetsClient(options.spreadsheetId);
+    this.client = new GoogleSdkSheetsClient(options.spreadsheetId, options.metrics);
     this.cacheBlocks = options.cacheBlocks ?? DEFAULT_CACHE_BLOCKS;
     this.lockReleaseDelayMs = lockReleaseDelayMs;
     this.metrics = options.metrics;
@@ -147,7 +147,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       await this.prepareForUse();
 
       const file = this.getFile(fileId);
-      if (file.isPersistent && !(await this.lease.acquire())) return VFS.SQLITE_BUSY;
+      if (file.isPersistent && !(await this.acquireLease("jWrite"))) return VFS.SQLITE_BUSY;
 
       let written = 0;
       let blocks = 0;
@@ -185,7 +185,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       await this.prepareForUse();
 
       const file = this.getFile(fileId);
-      if (file.isPersistent && !(await this.lease.acquire())) return VFS.SQLITE_BUSY;
+      if (file.isPersistent && !(await this.acquireLease("jTruncate"))) return VFS.SQLITE_BUSY;
 
       file.markSize(size);
       file.discardBlocksAtOrAfter(Math.ceil(size / GOOGLE_SHEETS_BLOCK_BYTES));
@@ -219,7 +219,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   async jLock(_fileId: number, lockType: number): Promise<SqliteResult> {
     return this.measureSqlite("jLock", { lockType }, () => this.withError(VFS.SQLITE_IOERR_LOCK, async () => {
       await this.prepareForUse();
-      return await this.lease.acquire() ? VFS.SQLITE_OK : VFS.SQLITE_BUSY;
+      return await this.acquireLease("jLock") ? VFS.SQLITE_OK : VFS.SQLITE_BUSY;
     }));
   }
 
@@ -256,7 +256,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       const path = normalizePath(filename);
       const slot = slotForPath(path, this.mainPath);
       if (slot === null) return VFS.SQLITE_OK;
-      if (!(await this.lease.acquire())) return VFS.SQLITE_BUSY;
+      if (!(await this.acquireLease("jDelete"))) return VFS.SQLITE_BUSY;
 
       await this.store.deleteMetadata(slot, path);
       this.clearOpenFilesForSlot(slot);
@@ -324,7 +324,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     if (metadata !== null) return metadata.size;
 
     if (!(flags & VFS.SQLITE_OPEN_CREATE)) throw new Error(`Google Sheets VFS file does not exist: ${path}`);
-    if (!(await this.lease.acquire())) throw new BusyError("Could not acquire Google Sheets VFS lease while opening file");
+    if (!(await this.acquireLease("openPersistentFile"))) throw new BusyError("Could not acquire Google Sheets VFS lease while opening file");
 
     await this.store.writeMetadata(slot, path, 0);
     return 0;
@@ -333,7 +333,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private async beginAtomicWrite(fileId: number, file: VfsFileState): Promise<SqliteResult> {
     await this.prepareForUse();
     if (this.atomicFileId !== null) throw new Error(`Atomic write already active for file ${this.atomicFileId}`);
-    if (!(await this.lease.acquire())) return VFS.SQLITE_BUSY;
+    if (!(await this.acquireLease("beginAtomicWrite"))) return VFS.SQLITE_BUSY;
 
     file.beginAtomicWrite();
     this.atomicFileId = fileId;
@@ -412,21 +412,25 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
     try {
       if (!file.dirtySize && file.dirtyBlocks.size === 0) {
+        this.emitMetric("vfs.flush.noop", true, 0, detail);
         this.emitMetric("vfs.flush", true, nowMs() - startedAt, { ...detail, noop: true });
         return;
       }
 
       if (file.slot === null) {
         file.finishFlush();
+        this.emitMetric("vfs.flush.temp", true, 0, detail);
         this.emitMetric("vfs.flush", true, nowMs() - startedAt, { ...detail, temp: true });
         return;
       }
 
-      if (!(await this.lease.acquire())) throw new BusyError("Could not acquire Google Sheets VFS lease while flushing file");
+      if (!(await this.acquireLease("flush"))) throw new BusyError("Could not acquire Google Sheets VFS lease while flushing file");
       await this.store.writeBlocksAndMetadata(file.slot, file.path, file.size, file.dirtyBlocks);
       file.finishFlush();
+      this.emitMetric("vfs.flush.persist", true, 0, detail);
       this.emitMetric("vfs.flush", true, nowMs() - startedAt, detail);
     } catch (error) {
+      this.emitMetric("vfs.flush.persist", false, 0, detail);
       this.emitMetric("vfs.flush", false, nowMs() - startedAt, detail);
       throw error;
     }
@@ -477,21 +481,40 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   private async releaseForGeneration(generation: number): Promise<void> {
     if (generation !== this.releaseGeneration) return;
-    const startedAt = nowMs();
-    try {
-      await this.lease.release();
-      this.emitMetric("vfs.lease.release", true, nowMs() - startedAt, { scheduled: true });
-    } catch (error) {
-      this.emitMetric("vfs.lease.release", false, nowMs() - startedAt, { scheduled: true });
-      throw error;
-    }
+    await this.releaseLease({ scheduled: true });
   }
 
   private async releaseLeaseAfterClose(): Promise<void> {
     try {
-      await this.lease.release();
+      await this.releaseLease({ close: true });
     } catch (error) {
       this.lastError = error;
+      throw error;
+    }
+  }
+
+  private async acquireLease(reason: string): Promise<boolean> {
+    const startedAt = nowMs();
+    const alreadyHeld = this.lease.isHeld;
+
+    try {
+      const acquired = await this.lease.acquire();
+      this.emitMetric("vfs.lease.acquire", acquired, nowMs() - startedAt, { reason, alreadyHeld, acquired });
+      return acquired;
+    } catch (error) {
+      this.emitMetric("vfs.lease.acquire", false, nowMs() - startedAt, { reason, alreadyHeld });
+      throw error;
+    }
+  }
+
+  private async releaseLease(detail: GoogleSheetsVFSMetricDetail): Promise<void> {
+    const startedAt = nowMs();
+
+    try {
+      await this.lease.release();
+      this.emitMetric("vfs.lease.release", true, nowMs() - startedAt, detail);
+    } catch (error) {
+      this.emitMetric("vfs.lease.release", false, nowMs() - startedAt, detail);
       throw error;
     }
   }

@@ -6,7 +6,14 @@ import {
   LOCK_COLUMNS,
   LOCK_INITIAL_ROWS,
 } from "./constants.js";
-import type { AppendResponse, CreatedSpreadsheet, SheetValueUpdate, ValueRange } from "./types.js";
+import type {
+  AppendResponse,
+  CreatedSpreadsheet,
+  GoogleSheetsVFSMetricDetail,
+  GoogleSheetsVFSMetrics,
+  SheetValueUpdate,
+  ValueRange,
+} from "./types.js";
 
 type GoogleApiResponse<T> = { result: T };
 
@@ -154,7 +161,10 @@ export async function createGoogleSheetsVfsSpreadsheet(title = `wa-sqlite VFS de
 export class GoogleSdkSheetsClient {
   private readonly sheetIdsByTitle = new Map<string, number>();
 
-  constructor(private readonly spreadsheetId: string) {}
+  constructor(
+    private readonly spreadsheetId: string,
+    private readonly metrics?: GoogleSheetsVFSMetrics,
+  ) {}
 
   async ensureSheetTabs(tabs: Array<{ title: string; rows: number; cols: number }>): Promise<void> {
     const spreadsheet = await this.getSpreadsheetSheets("sheets.properties(sheetId,title)");
@@ -204,9 +214,11 @@ export class GoogleSdkSheetsClient {
   async spreadsheetBatchUpdate(requests: SpreadsheetRequest[]): Promise<SpreadsheetBatchUpdateResult> {
     if (!requests.length) return {};
 
-    const response = await gapi.client.sheets.spreadsheets.batchUpdate({
-      spreadsheetId: this.spreadsheetId,
-      resource: { requests },
+    const response = await this.measureRequest("google.sheets.spreadsheets.batchUpdate", { requests: 1, batchRequests: requests.length }, async () => {
+      return await gapi.client.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: this.spreadsheetId,
+        resource: { requests },
+      });
     });
 
     return response.result;
@@ -215,11 +227,13 @@ export class GoogleSdkSheetsClient {
   async batchGet(ranges: string[]): Promise<ValueRange[]> {
     if (!ranges.length) return [];
 
-    const response = await gapi.client.sheets.spreadsheets.values.batchGet({
-      spreadsheetId: this.spreadsheetId,
-      ranges,
-      majorDimension: "ROWS",
-      valueRenderOption: "UNFORMATTED_VALUE",
+    const response = await this.measureRequest("google.sheets.values.batchGet", { requests: 1, ranges: ranges.length }, async () => {
+      return await gapi.client.sheets.spreadsheets.values.batchGet({
+        spreadsheetId: this.spreadsheetId,
+        ranges,
+        majorDimension: "ROWS",
+        valueRenderOption: "UNFORMATTED_VALUE",
+      });
     });
 
     return response.result.valueRanges ?? [];
@@ -228,29 +242,60 @@ export class GoogleSdkSheetsClient {
   async batchUpdate(data: SheetValueUpdate[]): Promise<void> {
     if (!data.length) return;
 
-    await gapi.client.sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: this.spreadsheetId,
-      resource: { valueInputOption: "RAW", data },
+    await this.measureRequest("google.sheets.values.batchUpdate", { requests: 1, ranges: data.length }, async () => {
+      await gapi.client.sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: this.spreadsheetId,
+        resource: { valueInputOption: "RAW", data },
+      });
     });
   }
 
   async append(range: string, values: SheetValueUpdate["values"]): Promise<AppendResponse> {
-    const response = await gapi.client.sheets.spreadsheets.values.append({
-      spreadsheetId: this.spreadsheetId,
-      range,
-      valueInputOption: "RAW",
-      insertDataOption: "INSERT_ROWS",
-      resource: { values },
+    const response = await this.measureRequest("google.sheets.values.append", { requests: 1, range, rows: values.length }, async () => {
+      return await gapi.client.sheets.spreadsheets.values.append({
+        spreadsheetId: this.spreadsheetId,
+        range,
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        resource: { values },
+      });
     });
 
     return response.result;
   }
 
   private async getSpreadsheetSheets(fields: string): Promise<SpreadsheetGetResult> {
-    const spreadsheet = await gapi.client.sheets.spreadsheets.get({
-      spreadsheetId: this.spreadsheetId,
-      fields,
+    const spreadsheet = await this.measureRequest("google.sheets.spreadsheets.get", { requests: 1, fields }, async () => {
+      return await gapi.client.sheets.spreadsheets.get({
+        spreadsheetId: this.spreadsheetId,
+        fields,
+      });
     });
     return spreadsheet.result;
   }
+
+  private async measureRequest<T>(name: string, detail: GoogleSheetsVFSMetricDetail, request: () => Promise<T>): Promise<T> {
+    const startedAt = nowMs();
+
+    try {
+      const result = await request();
+      this.emitMetric(name, true, nowMs() - startedAt, detail);
+      return result;
+    } catch (error) {
+      this.emitMetric(name, false, nowMs() - startedAt, detail);
+      throw error;
+    }
+  }
+
+  private emitMetric(name: string, ok: boolean, durationMs: number, detail: GoogleSheetsVFSMetricDetail): void {
+    try {
+      this.metrics?.onEvent?.({ name, ok, durationMs, detail });
+    } catch {
+      // Metrics must never affect Google API behavior.
+    }
+  }
+}
+
+function nowMs(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
