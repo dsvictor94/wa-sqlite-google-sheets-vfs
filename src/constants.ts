@@ -9,6 +9,7 @@ export const DEFAULT_LOCK_RELEASE_DELAY_MS = 1_000;
 export const DEFAULT_CACHE_BLOCKS = 128;
 
 export const LOCK_CELL_PREFIX = "LSV1|";
+export const LOCK_HEADER_RANGE = "A1:H1";
 export const LOCK_STATE_CELL = "A1";
 export const LOCK_STATE_ROW_INDEX = 0;
 export const LOCK_STATE_COLUMN_INDEX = 0;
