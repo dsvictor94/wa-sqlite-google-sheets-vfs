@@ -49,7 +49,7 @@ export class GoogleSheetsLease {
   get isHeld(): boolean { return this.localLock !== SQLITE_LOCK_NONE && this.hasUsableLocalLease(); }
   get hasReservedLock(): boolean { return this.localLock >= SQLITE_LOCK_RESERVED && this.hasUsableLocalLease(); }
 
-  async acquire(targetLock: number): Promise<boolean> {
+  async acquire(targetLock = SQLITE_LOCK_EXCLUSIVE): Promise<boolean> {
     const target = normalizeLock(targetLock);
     if (this.localLock >= target && this.hasUsableLocalLease()) return await this.renewCurrentLockIfNeeded();
     this.dropExpiredLocalLock();
