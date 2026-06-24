@@ -39,8 +39,7 @@ export class GoogleSheetsLease {
   constructor(private readonly client: GoogleSdkSheetsClient, options: GoogleSheetsLeaseOptions) {
     void options.databaseId;
     void options.lockReleaseDelayMs;
-    void options.lockSheetName;
-    this.blockSheetName = options.blockSheetName ?? DEFAULT_BLOCK_SHEET_NAME;
+    this.blockSheetName = options.blockSheetName ?? options.lockSheetName ?? DEFAULT_BLOCK_SHEET_NAME;
     this.leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
     this.lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
     this.renewBeforeExpiryMs = Math.min(5_000, Math.max(1_000, Math.floor(this.leaseMs / 3)));
