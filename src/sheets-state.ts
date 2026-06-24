@@ -66,7 +66,7 @@ export class GoogleSheetsLease {
     return false;
   }
 
-  async release(targetLock: number): Promise<void> {
+  async release(targetLock = SQLITE_LOCK_NONE): Promise<void> {
     const target = normalizeUnlockTarget(targetLock);
     if (this.localLock <= target) return;
 
