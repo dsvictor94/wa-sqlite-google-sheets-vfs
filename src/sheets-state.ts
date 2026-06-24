@@ -1,1 +1,3 @@
-export const sqliteState = true;
+export class GoogleSheetsLease {
+  get isHeld(): boolean { return false; }
+}
