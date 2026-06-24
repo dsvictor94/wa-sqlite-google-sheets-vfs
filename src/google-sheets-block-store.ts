@@ -1,5 +1,5 @@
 import { DEFAULT_BLOCK_SHEET_NAME, GOOGLE_SHEETS_BLOCK_BYTES, PersistentFileSlot, BLOCK_DATA_START_ROW, BLOCK_METADATA_START_ROW } from "./constants.js";
-import { GoogleSdkSheetsClient } from "./google-sheets-client.js";
+import { GoogleSdkSheetsClient, type SpreadsheetRequest } from "./google-sheets-client.js";
 import type { SheetValueUpdate } from "./types.js";
 import { base64ToBytes, bytesToBase64, columnName, copyFixedBlock, quoteSheetName } from "./util.js";
 
@@ -15,6 +15,20 @@ export type GoogleSheetsBlockStoreOptions = {
   stripesPerFile: number;
 };
 
+type SheetCellData = {
+  userEnteredValue: {
+    numberValue?: number;
+    stringValue?: string;
+    boolValue?: boolean;
+  };
+};
+
+type EncodedBlockCell = {
+  row: number;
+  col: number;
+  value: string;
+};
+
 export class GoogleSheetsBlockStore {
   readonly sheetRangePrefix: string;
 
@@ -22,7 +36,7 @@ export class GoogleSheetsBlockStore {
     private readonly client: GoogleSdkSheetsClient,
     private readonly options: GoogleSheetsBlockStoreOptions,
   ) {
-    this.sheetRangePrefix = quoteSheetName(options.blockSheetName ?? DEFAULT_BLOCK_SHEET_NAME);
+    this.sheetRangePrefix = quoteSheetName(this.blockSheetName);
   }
 
   async readMetadata(slot: PersistentFileSlot): Promise<FileMetadata | null> {
@@ -71,17 +85,13 @@ export class GoogleSheetsBlockStore {
     size: number,
     dirtyBlocks: ReadonlyMap<number, Uint8Array>,
   ): Promise<void> {
-    const updates: SheetValueUpdate[] = [];
+    const sheetId = await this.client.getSheetId(this.blockSheetName);
+    const requests: SpreadsheetRequest[] = [];
 
-    for (const [blockIndex, block] of dirtyBlocks) {
-      updates.push({
-        range: this.blockRange(slot, blockIndex),
-        values: [[bytesToBase64(copyFixedBlock(block, GOOGLE_SHEETS_BLOCK_BYTES))]],
-      });
-    }
+    requests.push(...this.blockUpdateRequests(sheetId, slot, dirtyBlocks));
+    requests.push(this.metadataUpdateCells(sheetId, slot, path, size));
 
-    updates.push(this.metadataUpdate(slot, path, size));
-    await this.client.batchUpdate(updates);
+    await this.client.spreadsheetBatchUpdate(requests);
   }
 
   metadataRange(slot: PersistentFileSlot): string {
@@ -93,12 +103,97 @@ export class GoogleSheetsBlockStore {
     return `${this.sheetRangePrefix}!${columnName(col)}${row}`;
   }
 
+  private get blockSheetName(): string {
+    return this.options.blockSheetName ?? DEFAULT_BLOCK_SHEET_NAME;
+  }
+
   private metadataUpdate(slot: PersistentFileSlot, path: string, size: number): SheetValueUpdate {
     if (!Number.isSafeInteger(size) || size < 0) throw new RangeError(`invalid file size ${size}`);
 
     return {
       range: this.metadataRange(slot),
       values: [[slot, path, size]],
+    };
+  }
+
+  private metadataUpdateCells(sheetId: number, slot: PersistentFileSlot, path: string, size: number): SpreadsheetRequest {
+    if (!Number.isSafeInteger(size) || size < 0) throw new RangeError(`invalid file size ${size}`);
+
+    const row = BLOCK_METADATA_START_ROW + slot;
+    return {
+      updateCells: {
+        range: {
+          sheetId,
+          startRowIndex: row - 1,
+          endRowIndex: row,
+          startColumnIndex: 0,
+          endColumnIndex: 3,
+        },
+        rows: [
+          {
+            values: [numberCell(slot), stringCell(path), numberCell(size)],
+          },
+        ],
+        fields: "userEnteredValue",
+      },
+    };
+  }
+
+  private blockUpdateRequests(
+    sheetId: number,
+    slot: PersistentFileSlot,
+    dirtyBlocks: ReadonlyMap<number, Uint8Array>,
+  ): SpreadsheetRequest[] {
+    const cells = [...dirtyBlocks]
+      .map(([blockIndex, block]) => {
+        const { row, col } = this.blockCell(slot, blockIndex);
+        return {
+          row,
+          col,
+          value: bytesToBase64(copyFixedBlock(block, GOOGLE_SHEETS_BLOCK_BYTES)),
+        };
+      })
+      .sort((a, b) => a.row - b.row || a.col - b.col);
+
+    const requests: SpreadsheetRequest[] = [];
+    let i = 0;
+
+    while (i < cells.length) {
+      const first = cells[i];
+      const values: SheetCellData[] = [stringCell(first.value)];
+      let last = first;
+      i++;
+
+      while (i < cells.length && cells[i].row === first.row && cells[i].col === last.col + 1) {
+        last = cells[i];
+        values.push(stringCell(last.value));
+        i++;
+      }
+
+      requests.push(this.contiguousBlockUpdate(sheetId, first, last, values));
+    }
+
+    return requests;
+  }
+
+  private contiguousBlockUpdate(
+    sheetId: number,
+    first: EncodedBlockCell,
+    last: EncodedBlockCell,
+    values: SheetCellData[],
+  ): SpreadsheetRequest {
+    return {
+      updateCells: {
+        range: {
+          sheetId,
+          startRowIndex: first.row - 1,
+          endRowIndex: first.row,
+          startColumnIndex: first.col - 1,
+          endColumnIndex: last.col,
+        },
+        rows: [{ values }],
+        fields: "userEnteredValue",
+      },
     };
   }
 
@@ -117,4 +212,12 @@ export class GoogleSheetsBlockStore {
       col: 2 + (blockIndex % this.options.blocksPerStripe),
     };
   }
+}
+
+function stringCell(value: string): SheetCellData {
+  return { userEnteredValue: { stringValue: value } };
+}
+
+function numberCell(value: number): SheetCellData {
+  return { userEnteredValue: { numberValue: value } };
 }

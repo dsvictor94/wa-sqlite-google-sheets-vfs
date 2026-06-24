@@ -124,9 +124,11 @@ PRAGMA synchronous=FULL;
 
 `EXTRA` is also acceptable, but it is not expected to add meaningful protection for this Sheets-backed VFS because there is no filesystem directory to sync after deleting the rollback journal.
 
-A SQL transaction that commits successfully is expected to be durable only when SQLite reaches the rollback-journal commit path and its required `xSync` calls succeed. Do not use `synchronous=NORMAL` or `synchronous=OFF` if your application requires a successful SQL `COMMIT` to be durable after a browser reload, tab close, network failure, or process crash.
+The VFS advertises SQLite batch-atomic write support for the main database file. Rollback journals and other auxiliary SQLite files are kept in memory; only main database blocks and metadata are persisted to Google Sheets. During an atomic commit, dirty main database blocks and metadata are flushed together with a single Sheets `spreadsheets.batchUpdate` request.
 
-Do not use WAL unless shared-memory semantics are added to the VFS.
+A SQL transaction that commits successfully is expected to be durable once SQLite completes the batch-atomic commit path and the Sheets batch update returns successfully. Do not use `synchronous=NORMAL` or `synchronous=OFF` if your application requires a successful SQL `COMMIT` to be durable after a browser reload, tab close, network failure, or process crash.
+
+Do not use WAL unless shared-memory semantics are added to the VFS. This VFS keeps WAL files in memory and rejects attempts to open SQLite WAL files.
 
 For multi-statement writes, prefer an explicit transaction so SQLite does not perform a full lock/unlock cycle for every individual statement:
 
@@ -136,7 +138,7 @@ BEGIN IMMEDIATE;
 COMMIT;
 ```
 
-The VFS keeps multi-user safety by holding the Google Sheets lease while the connection is active. After SQLite unlocks to `SQLITE_LOCK_NONE`, the VFS flushes any remaining persistent dirty state before returning from unlock, then waits for `lockReleaseDelayMs` before releasing the lease. If SQLite uses the VFS again before that delay expires, the scheduled release is canceled. This coalesces short lock/unlock bursts without allowing another browser to acquire the spreadsheet before pending data is flushed.
+The VFS keeps multi-user safety by acquiring and renewing the Google Sheets lease before persistent writes and flushes. After SQLite unlocks to `SQLITE_LOCK_NONE`, the VFS waits for `lockReleaseDelayMs` before releasing the lease. If SQLite uses the VFS again before that delay expires, the scheduled release is canceled. Unlock does not flush pending main database changes; durable main database state is flushed by `xSync` outside an atomic write or by `SQLITE_FCNTL_COMMIT_ATOMIC_WRITE` during an atomic commit.
 
 ## Browser usage
 

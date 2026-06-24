@@ -1,5 +1,6 @@
 import { FacadeVFS } from "wa-sqlite/src/FacadeVFS.js";
 import * as VFS from "wa-sqlite/src/VFS.js";
+import * as SQLite from "wa-sqlite/src/sqlite-constants.js";
 import {
   DEFAULT_BLOCKS_PER_STRIPE,
   DEFAULT_CACHE_BLOCKS,
@@ -33,6 +34,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private releaseTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private releaseGeneration = 0;
   private pendingRelease: Promise<void> | null = null;
+  private atomicFileId: number | null = null;
 
   static async create(name: string, module: unknown, options: GoogleSheetsVFSOptions): Promise<GoogleSheetsSQLiteVFS> {
     const vfs = new GoogleSheetsSQLiteVFS(name, module, options);
@@ -80,6 +82,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   async jOpen(name: string | null, fileId: number, flags: number, pOutFlags: DataView): Promise<SqliteResult> {
     return this.measureSqlite("jOpen", { fileId, flags, hasName: name !== null }, () => this.withError(VFS.SQLITE_CANTOPEN, async () => {
       await this.prepareForUse();
+      if (flags & VFS.SQLITE_OPEN_WAL) throw new Error("WAL mode is not supported by the Google Sheets VFS");
 
       const path = normalizePath(name);
       const slot = slotForOpen(path, flags);
@@ -97,10 +100,16 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       await this.prepareForUse();
 
       const file = this.getFile(fileId);
-      await this.flush(file);
+      try {
+        await this.flush(file);
+      } catch (error) {
+        if (file.slot === PersistentFileSlot.Main) this.clearPersistentCaches();
+        throw error;
+      }
+
       this.files.delete(fileId);
 
-      if (!this.hasOpenPersistentFiles()) await this.lease.release();
+      if (!this.hasOpenPersistentFiles()) await this.releaseLeaseAfterClose();
       return VFS.SQLITE_OK;
     }));
   }
@@ -187,8 +196,16 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   async jSync(fileId: number): Promise<SqliteResult> {
     return this.measureSqlite("jSync", { fileId }, () => this.withError(VFS.SQLITE_IOERR_FSYNC, async () => {
       await this.prepareForUse();
-      await this.flush(this.getFile(fileId));
-      return VFS.SQLITE_OK;
+      const file = this.getFile(fileId);
+      if (file.isInAtomicWrite) return VFS.SQLITE_OK;
+
+      try {
+        await this.flush(file);
+        return VFS.SQLITE_OK;
+      } catch (error) {
+        if (file.slot === PersistentFileSlot.Main) this.clearPersistentCaches();
+        throw error;
+      }
     }));
   }
 
@@ -209,7 +226,6 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   async jUnlock(_fileId: number, lockType: number): Promise<SqliteResult> {
     return this.measureSqlite("jUnlock", { lockType }, () => this.withError(VFS.SQLITE_IOERR_UNLOCK, async () => {
       if (lockType === SQLITE_LOCK_NONE) {
-        await this.flushDirtyPersistentFiles();
         this.scheduleReleaseSoon();
       }
 
@@ -255,14 +271,37 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     }));
   }
 
+  async jFileControl(fileId: number, op: number, _pArg: DataView): Promise<SqliteResult> {
+    return this.measureSqlite("jFileControl", { fileId, op }, () => this.withError(SQLite.SQLITE_IOERR, async () => {
+      const file = this.getFile(fileId);
+      if (file.slot !== PersistentFileSlot.Main) return SQLite.SQLITE_NOTFOUND;
+
+      switch (op) {
+        case SQLite.SQLITE_FCNTL_BEGIN_ATOMIC_WRITE:
+          return await this.beginAtomicWrite(fileId, file);
+
+        case SQLite.SQLITE_FCNTL_COMMIT_ATOMIC_WRITE:
+          return await this.commitAtomicWrite(fileId, file);
+
+        case SQLite.SQLITE_FCNTL_ROLLBACK_ATOMIC_WRITE:
+          return this.rollbackAtomicWrite(fileId, file);
+
+        default:
+          return SQLite.SQLITE_NOTFOUND;
+      }
+    }));
+  }
+
   jSectorSize(): number {
     this.emitMetric("jSectorSize", true, 0);
     return 512;
   }
 
-  jDeviceCharacteristics(): number {
-    this.emitMetric("jDeviceCharacteristics", true, 0);
-    return 0;
+  jDeviceCharacteristics(fileId: number): number {
+    const file = this.files.get(fileId);
+    const characteristics = file?.slot === PersistentFileSlot.Main ? SQLite.SQLITE_IOCAP_BATCH_ATOMIC : 0;
+    this.emitMetric("jDeviceCharacteristics", true, 0, { fileId, characteristics });
+    return characteristics;
   }
 
   jGetLastError(zBuf: Uint8Array): SqliteResult {
@@ -289,6 +328,45 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
     await this.store.writeMetadata(slot, path, 0);
     return 0;
+  }
+
+  private async beginAtomicWrite(fileId: number, file: VfsFileState): Promise<SqliteResult> {
+    await this.prepareForUse();
+    if (this.atomicFileId !== null) throw new Error(`Atomic write already active for file ${this.atomicFileId}`);
+    if (!(await this.lease.acquire())) return VFS.SQLITE_BUSY;
+
+    file.beginAtomicWrite();
+    this.atomicFileId = fileId;
+    this.emitMetric("vfs.atomic.begin", true, 0, { fileId, file: file.path });
+    return VFS.SQLITE_OK;
+  }
+
+  private async commitAtomicWrite(fileId: number, file: VfsFileState): Promise<SqliteResult> {
+    try {
+      if (this.atomicFileId !== fileId || !file.isInAtomicWrite) {
+        throw new Error(`No active atomic write for ${file.path}`);
+      }
+
+      await this.flush(file);
+      file.commitAtomicWrite();
+      this.atomicFileId = null;
+      this.emitMetric("vfs.atomic.commit", true, 0, { fileId, file: file.path });
+      return VFS.SQLITE_OK;
+    } catch (error) {
+      this.lastError = error;
+      file.rollbackAtomicWrite();
+      if (this.atomicFileId === fileId) this.atomicFileId = null;
+      this.clearPersistentCaches();
+      this.emitMetric("vfs.atomic.commit", false, 0, { fileId, file: file.path });
+      return SQLite.SQLITE_IOERR_COMMIT_ATOMIC;
+    }
+  }
+
+  private rollbackAtomicWrite(fileId: number, file: VfsFileState): SqliteResult {
+    file.rollbackAtomicWrite();
+    if (this.atomicFileId === fileId) this.atomicFileId = null;
+    this.emitMetric("vfs.atomic.rollback", true, 0, { fileId, file: file.path });
+    return VFS.SQLITE_OK;
   }
 
   private async readVisibleBlock(file: VfsFileState, blockIndex: number): Promise<Uint8Array> {
@@ -329,7 +407,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       file: file.path,
       slot: file.slot === null ? "temp" : file.slot,
       dirtyBlocks: file.dirtyBlocks.size,
-      dirtySize: file.dirtySize !== null,
+      dirtySize: file.dirtySize,
     };
 
     try {
@@ -351,12 +429,6 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     } catch (error) {
       this.emitMetric("vfs.flush", false, nowMs() - startedAt, detail);
       throw error;
-    }
-  }
-
-  private async flushDirtyPersistentFiles(): Promise<void> {
-    for (const file of this.files.values()) {
-      if (file.isPersistent) await this.flush(file);
     }
   }
 
@@ -415,6 +487,15 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     }
   }
 
+  private async releaseLeaseAfterClose(): Promise<void> {
+    try {
+      await this.lease.release();
+    } catch (error) {
+      this.lastError = error;
+      throw error;
+    }
+  }
+
   private getFile(fileId: number): VfsFileState {
     const file = this.files.get(fileId);
     if (!file) throw new Error(`Unknown SQLite file id ${fileId}`);
@@ -432,6 +513,12 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private clearOpenFilesForSlot(slot: PersistentFileSlot): void {
     for (const file of this.files.values()) {
       if (file.slot === slot) file.clearVolatileState();
+    }
+  }
+
+  private clearPersistentCaches(): void {
+    for (const file of this.files.values()) {
+      if (file.isPersistent) file.cache.clear();
     }
   }
 
