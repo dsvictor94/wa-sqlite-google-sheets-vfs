@@ -10,6 +10,5 @@
     "outDir": "dist",
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/google-sheets-*.bak.ts"]
+  "include": ["src/index.ts"]
 }
