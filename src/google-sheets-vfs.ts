@@ -1,5 +1,6 @@
 import { FacadeVFS } from "wa-sqlite/src/FacadeVFS.js";
 import * as VFS from "wa-sqlite/src/VFS.js";
+import * as SQLite from "wa-sqlite/src/sqlite-constants.js";
 import {
   DEFAULT_BLOCKS_PER_STRIPE,
   DEFAULT_CACHE_BLOCKS,
@@ -271,22 +272,22 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   }
 
   async jFileControl(fileId: number, op: number, _pArg: DataView): Promise<SqliteResult> {
-    return this.measureSqlite("jFileControl", { fileId, op }, () => this.withError(VFS.SQLITE_IOERR, async () => {
+    return this.measureSqlite("jFileControl", { fileId, op }, () => this.withError(SQLite.SQLITE_IOERR, async () => {
       const file = this.getFile(fileId);
-      if (file.slot !== PersistentFileSlot.Main) return VFS.SQLITE_NOTFOUND;
+      if (file.slot !== PersistentFileSlot.Main) return SQLite.SQLITE_NOTFOUND;
 
       switch (op) {
-        case VFS.SQLITE_FCNTL_BEGIN_ATOMIC_WRITE:
+        case SQLite.SQLITE_FCNTL_BEGIN_ATOMIC_WRITE:
           return await this.beginAtomicWrite(fileId, file);
 
-        case VFS.SQLITE_FCNTL_COMMIT_ATOMIC_WRITE:
+        case SQLite.SQLITE_FCNTL_COMMIT_ATOMIC_WRITE:
           return await this.commitAtomicWrite(fileId, file);
 
-        case VFS.SQLITE_FCNTL_ROLLBACK_ATOMIC_WRITE:
+        case SQLite.SQLITE_FCNTL_ROLLBACK_ATOMIC_WRITE:
           return this.rollbackAtomicWrite(fileId, file);
 
         default:
-          return VFS.SQLITE_NOTFOUND;
+          return SQLite.SQLITE_NOTFOUND;
       }
     }));
   }
@@ -298,7 +299,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   jDeviceCharacteristics(fileId: number): number {
     const file = this.files.get(fileId);
-    const characteristics = file?.slot === PersistentFileSlot.Main ? VFS.SQLITE_IOCAP_BATCH_ATOMIC : 0;
+    const characteristics = file?.slot === PersistentFileSlot.Main ? SQLite.SQLITE_IOCAP_BATCH_ATOMIC : 0;
     this.emitMetric("jDeviceCharacteristics", true, 0, { fileId, characteristics });
     return characteristics;
   }
@@ -357,7 +358,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       if (this.atomicFileId === fileId) this.atomicFileId = null;
       this.clearPersistentCaches();
       this.emitMetric("vfs.atomic.commit", false, 0, { fileId, file: file.path });
-      return VFS.SQLITE_IOERR_COMMIT_ATOMIC;
+      return SQLite.SQLITE_IOERR_COMMIT_ATOMIC;
     }
   }
 
