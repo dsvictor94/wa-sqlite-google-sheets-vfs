@@ -13,6 +13,7 @@ export const LOCK_HEADER_RANGE = "A1:H1";
 export const LOCK_STATE_CELL = "A1";
 export const LOCK_STATE_ROW_INDEX = 0;
 export const LOCK_STATE_COLUMN_INDEX = 0;
+export const LOCK_COLUMNS = 8;
 
 export const BLOCK_METADATA_START_ROW = 2;
 export const BLOCK_DATA_START_ROW = 6;
