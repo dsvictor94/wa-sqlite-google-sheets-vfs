@@ -40,6 +40,26 @@ type GridRange = {
   endColumnIndex: number;
 };
 
+type ExtendedValue = {
+  numberValue?: number;
+  stringValue?: string;
+  boolValue?: boolean;
+};
+
+type CellData = {
+  userEnteredValue?: ExtendedValue;
+};
+
+type RowData = {
+  values?: CellData[];
+};
+
+type UpdateCellsRequest = {
+  range: GridRange;
+  rows: RowData[];
+  fields: string;
+};
+
 type FindReplaceRequest = {
   find: string;
   replacement: string;
@@ -50,9 +70,10 @@ type FindReplaceRequest = {
   range: GridRange;
 };
 
-type SpreadsheetRequest =
+export type SpreadsheetRequest =
   | { addSheet: { properties: GoogleSheetProperties } }
-  | { findReplace: FindReplaceRequest };
+  | { findReplace: FindReplaceRequest }
+  | { updateCells: UpdateCellsRequest };
 
 type FindReplaceResponse = {
   valuesChanged?: number;
