@@ -10,7 +10,7 @@ import {
 import { GoogleSdkSheetsClient, type SpreadsheetBatchUpdateResult, type SpreadsheetRequest } from "./google-sheets-client.js";
 import { sleep } from "./util.js";
 
-export type GoogleSheetsLeaseOptions = { databaseId: string; blockSheetName?: string; leaseMs?: number; lockTimeoutMs?: number; lockReleaseDelayMs?: number };
+export type GoogleSheetsLeaseOptions = { databaseId: string; blockSheetName?: string; lockSheetName?: string; leaseMs?: number; lockTimeoutMs?: number; lockReleaseDelayMs?: number };
 export type GoogleSheetsWriteBatchRenewal = { requests: SpreadsheetRequest[]; replyIndex: number; expiresAtSec: string };
 
 type LockLetter = "S" | "R" | "P" | "X";
@@ -39,6 +39,7 @@ export class GoogleSheetsLease {
   constructor(private readonly client: GoogleSdkSheetsClient, options: GoogleSheetsLeaseOptions) {
     void options.databaseId;
     void options.lockReleaseDelayMs;
+    void options.lockSheetName;
     this.blockSheetName = options.blockSheetName ?? DEFAULT_BLOCK_SHEET_NAME;
     this.leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
     this.lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
