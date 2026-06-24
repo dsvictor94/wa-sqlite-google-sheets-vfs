@@ -34,7 +34,6 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private releaseGeneration = 0;
   private pendingRelease: Promise<void> | null = null;
   private atomicFileId: number | null = null;
-  private poisoned = false;
 
   static async create(name: string, module: unknown, options: GoogleSheetsVFSOptions): Promise<GoogleSheetsSQLiteVFS> {
     const vfs = new GoogleSheetsSQLiteVFS(name, module, options);
@@ -97,17 +96,14 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   async jClose(fileId: number): Promise<SqliteResult> {
     return this.measureSqlite("jClose", { fileId }, () => this.withError(VFS.SQLITE_IOERR_CLOSE, async () => {
+      await this.prepareForUse();
+
       const file = this.getFile(fileId);
-      if (this.poisoned) {
-        file.clearVolatileState();
-      } else {
-        await this.prepareForUse();
-        try {
-          await this.flush(file);
-        } catch (error) {
-          if (file.slot === PersistentFileSlot.Main) this.poisonAfterUnknownCommit(error);
-          throw error;
-        }
+      try {
+        await this.flush(file);
+      } catch (error) {
+        if (file.slot === PersistentFileSlot.Main) this.clearPersistentCaches();
+        throw error;
       }
 
       this.files.delete(fileId);
@@ -206,7 +202,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
         await this.flush(file);
         return VFS.SQLITE_OK;
       } catch (error) {
-        if (file.slot === PersistentFileSlot.Main) this.poisonAfterUnknownCommit(error);
+        if (file.slot === PersistentFileSlot.Main) this.clearPersistentCaches();
         throw error;
       }
     }));
@@ -356,7 +352,10 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       this.emitMetric("vfs.atomic.commit", true, 0, { fileId, file: file.path });
       return VFS.SQLITE_OK;
     } catch (error) {
-      this.poisonAfterUnknownCommit(error);
+      this.lastError = error;
+      file.rollbackAtomicWrite();
+      if (this.atomicFileId === fileId) this.atomicFileId = null;
+      this.clearPersistentCaches();
       this.emitMetric("vfs.atomic.commit", false, 0, { fileId, file: file.path });
       return VFS.SQLITE_IOERR_COMMIT_ATOMIC;
     }
@@ -411,8 +410,6 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     };
 
     try {
-      if (this.poisoned) throw new PoisonedVfsError("Google Sheets VFS connection is poisoned after an unknown commit outcome");
-
       if (!file.dirtySize && file.dirtyBlocks.size === 0) {
         this.emitMetric("vfs.flush", true, nowMs() - startedAt, { ...detail, noop: true });
         return;
@@ -435,23 +432,10 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   }
 
   private async prepareForUse(): Promise<void> {
-    if (this.poisoned) throw new PoisonedVfsError("Google Sheets VFS connection is poisoned after an unknown commit outcome; close and reopen it");
-
     this.cancelScheduledRelease();
 
     const pending = this.pendingRelease;
     if (pending !== null) await pending;
-  }
-
-  private poisonAfterUnknownCommit(error: unknown): void {
-    this.lastError = error;
-    this.poisoned = true;
-    this.atomicFileId = null;
-    this.cancelScheduledRelease();
-
-    for (const file of this.files.values()) {
-      file.clearVolatileState();
-    }
   }
 
   private scheduleReleaseSoon(): void {
@@ -507,7 +491,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       await this.lease.release();
     } catch (error) {
       this.lastError = error;
-      if (!this.poisoned) throw error;
+      throw error;
     }
   }
 
@@ -528,6 +512,12 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private clearOpenFilesForSlot(slot: PersistentFileSlot): void {
     for (const file of this.files.values()) {
       if (file.slot === slot) file.clearVolatileState();
+    }
+  }
+
+  private clearPersistentCaches(): void {
+    for (const file of this.files.values()) {
+      if (file.isPersistent) file.cache.clear();
     }
   }
 
@@ -583,7 +573,6 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 }
 
 class BusyError extends Error {}
-class PoisonedVfsError extends Error {}
 
 function validatePositiveInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
