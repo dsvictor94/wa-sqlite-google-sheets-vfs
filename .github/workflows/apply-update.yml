@@ -1,0 +1,42 @@
+name: Apply patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: Branch to update
+        required: true
+      patch_gz_path:
+        description: Path to the .patch.gz file in the target branch
+        required: true
+        default: patches/update.patch.gz
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Apply patch
+        run: |
+          test -f "${{ inputs.patch_gz_path }}"
+          gunzip -c "${{ inputs.patch_gz_path }}" | git apply
+          rm "${{ inputs.patch_gz_path }}"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Apply compressed patch"
+          git push origin "HEAD:${{ inputs.target_branch }}"
