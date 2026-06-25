@@ -6,7 +6,6 @@ on:
       target_branch:
         description: Branch to update
         required: true
-        default: codex/rollback-lock-cell-v2
       patch_gz_path:
         description: Path to the .patch.gz file in the target branch
         required: true
