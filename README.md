@@ -103,15 +103,24 @@ The upstream package includes both the built `dist/*` artifacts and the VFS help
 - Google Sheets SDK client wrapper.
 - Async wa-sqlite VFS implementation.
 - Full read/write/truncate/sync/file-size support.
-- Coarse-grained lock lease in a separate sheet tab.
+- Rollback-style lock state stored in the database sheet lock cell.
 - Lazy block reads: it never downloads the full database.
 - In-memory handling for temporary SQLite files.
 
 ## Storage layout
 
-The default lock tab is `__sqlite_lock`.
+The default block tab is `__sqlite_blocks`.
 
-The default block tab is `__sqlite_blocks`. Rows 2-5 store file metadata. Block data starts at row 6. Each cell stores one base64-encoded 1024-byte block.
+Cell `A1` is reserved for lock state. New lock state uses the `LSV1|` prefix followed by zero or more entries in this form:
+
+```txt
+S:<expiresAtSec>:<owner>;
+R:<expiresAtSec>:<owner>;
+P:<expiresAtSec>:<owner>;
+X:<expiresAtSec>:<owner>;
+```
+
+Rows 2-5 store file metadata. Block data starts at row 6. Each data cell stores one base64-encoded 1024-byte block.
 
 ## Usage notes
 
@@ -138,7 +147,9 @@ BEGIN IMMEDIATE;
 COMMIT;
 ```
 
-The VFS keeps multi-user safety by acquiring and renewing the Google Sheets lease before persistent writes and flushes. After SQLite unlocks to `SQLITE_LOCK_NONE`, the VFS waits for `lockReleaseDelayMs` before releasing the lease. If SQLite uses the VFS again before that delay expires, the scheduled release is canceled. Unlock does not flush pending main database changes; durable main database state is flushed by `xSync` outside an atomic write or by `SQLITE_FCNTL_COMMIT_ATOMIC_WRITE` during an atomic commit.
+The lock helper stores one entry per open handle and uses SQLite rollback-style states: shared (`S`), reserved (`R`), pending (`P`), and exclusive (`X`). Each lock acquisition first removes expired entries in the same Sheets `spreadsheets.batchUpdate` call, and exclusive flushes can prepend a lease renewal request to the same batch as the block writes.
+
+Unlock does not flush pending main database changes; durable main database state is flushed by `xSync` outside an atomic write or by `SQLITE_FCNTL_COMMIT_ATOMIC_WRITE` during an atomic commit.
 
 ## Browser usage
 

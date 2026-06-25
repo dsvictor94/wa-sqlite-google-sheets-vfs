@@ -2,9 +2,8 @@ import {
   BLOCK_SHEET_INITIAL_COLUMNS,
   BLOCK_SHEET_INITIAL_ROWS,
   DEFAULT_BLOCK_SHEET_NAME,
-  DEFAULT_LOCK_SHEET_NAME,
-  LOCK_COLUMNS,
-  LOCK_INITIAL_ROWS,
+  LOCK_CELL_PREFIX,
+  LOCK_STATE_CELL,
 } from "./constants.js";
 import type {
   AppendResponse,
@@ -14,6 +13,7 @@ import type {
   SheetValueUpdate,
   ValueRange,
 } from "./types.js";
+import { quoteSheetName } from "./util.js";
 
 type GoogleApiResponse<T> = { result: T };
 
@@ -145,13 +145,20 @@ export async function createGoogleSheetsVfsSpreadsheet(title = `wa-sqlite VFS de
     resource: {
       properties: { title },
       sheets: [
-        { properties: { title: DEFAULT_LOCK_SHEET_NAME, gridProperties: { rowCount: LOCK_INITIAL_ROWS, columnCount: LOCK_COLUMNS } } },
         { properties: { title: DEFAULT_BLOCK_SHEET_NAME, gridProperties: { rowCount: BLOCK_SHEET_INITIAL_ROWS, columnCount: BLOCK_SHEET_INITIAL_COLUMNS } } },
       ],
     },
   });
 
   const spreadsheetId = response.result.spreadsheetId;
+  const client = new GoogleSdkSheetsClient(spreadsheetId);
+  await client.batchUpdate([
+    {
+      range: `${quoteSheetName(DEFAULT_BLOCK_SHEET_NAME)}!${LOCK_STATE_CELL}`,
+      values: [[LOCK_CELL_PREFIX]],
+    },
+  ]);
+
   return {
     spreadsheetId,
     spreadsheetUrl: response.result.spreadsheetUrl ?? `https://docs.google.com/spreadsheets/d/${spreadsheetId}`,

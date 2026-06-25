@@ -1,5 +1,5 @@
 import { DEFAULT_BLOCK_SHEET_NAME, GOOGLE_SHEETS_BLOCK_BYTES, PersistentFileSlot, BLOCK_DATA_START_ROW, BLOCK_METADATA_START_ROW } from "./constants.js";
-import { GoogleSdkSheetsClient, type SpreadsheetRequest } from "./google-sheets-client.js";
+import { GoogleSdkSheetsClient, type SpreadsheetBatchUpdateResult, type SpreadsheetRequest } from "./google-sheets-client.js";
 import type { SheetValueUpdate } from "./types.js";
 import { base64ToBytes, bytesToBase64, columnName, copyFixedBlock, quoteSheetName } from "./util.js";
 
@@ -84,14 +84,15 @@ export class GoogleSheetsBlockStore {
     path: string,
     size: number,
     dirtyBlocks: ReadonlyMap<number, Uint8Array>,
-  ): Promise<void> {
+    leadingRequests: SpreadsheetRequest[] = [],
+  ): Promise<SpreadsheetBatchUpdateResult> {
     const sheetId = await this.client.getSheetId(this.blockSheetName);
-    const requests: SpreadsheetRequest[] = [];
+    const requests: SpreadsheetRequest[] = [...leadingRequests];
 
     requests.push(...this.blockUpdateRequests(sheetId, slot, dirtyBlocks));
     requests.push(this.metadataUpdateCells(sheetId, slot, path, size));
 
-    await this.client.spreadsheetBatchUpdate(requests);
+    return await this.client.spreadsheetBatchUpdate(requests);
   }
 
   metadataRange(slot: PersistentFileSlot): string {

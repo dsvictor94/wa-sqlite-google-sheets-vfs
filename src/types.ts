@@ -13,8 +13,8 @@ export type GoogleSheetsVFSMetrics = {
 
 export type GoogleSheetsVFSOptions = {
   spreadsheetId: string;
-  lockSheetName?: string;
   blockSheetName?: string;
+  lockSheetName?: string;
   databaseId?: string;
   blockBytes?: 1024;
   blocksPerStripe?: number;
