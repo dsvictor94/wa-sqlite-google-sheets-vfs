@@ -1,4 +1,4 @@
-name: Apply zipped patch
+name: Apply patch
 
 on:
   workflow_dispatch:
@@ -6,7 +6,11 @@ on:
       target_branch:
         description: Branch to update
         required: true
-        default: codex/patch-artifact
+        default: codex/rollback-lock-cell-v2
+      patch_gz_path:
+        description: Path to the .patch.gz file in the target branch
+        required: true
+        default: patches/update.patch.gz
 
 permissions:
   contents: write
@@ -20,16 +24,13 @@ jobs:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 0
 
-      - name: Unpack patch
-        run: |
-          unzip -o patches/update.zip -d /tmp/update-patch
-          test -f /tmp/update-patch/ideal-remaining.patch
-
       - name: Apply patch
         run: |
-          git apply /tmp/update-patch/ideal-remaining.patch
+          test -f "${{ inputs.patch_gz_path }}"
+          gunzip -c "${{ inputs.patch_gz_path }}" | git apply
+          rm "${{ inputs.patch_gz_path }}"
 
-      - name: Commit changes
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -38,5 +39,5 @@ jobs:
             echo "No changes to commit"
             exit 0
           fi
-          git commit -m "Apply zipped patch"
+          git commit -m "Apply compressed patch"
           git push origin "HEAD:${{ inputs.target_branch }}"
