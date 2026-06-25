@@ -26,7 +26,7 @@ jobs:
       - name: Apply patch
         run: |
           test -f "${{ inputs.patch_gz_path }}"
-          gunzip -c "${{ inputs.patch_gz_path }}" | git apply
+          gunzip -c "${{ inputs.patch_gz_path }}" | git apply --3way
           rm "${{ inputs.patch_gz_path }}"
 
       - name: Commit and push
