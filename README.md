@@ -151,6 +151,55 @@ The lock helper stores one entry per open handle and uses SQLite rollback-style 
 
 Unlock does not flush pending main database changes; durable main database state is flushed by `xSync` outside an atomic write or by `SQLITE_FCNTL_COMMIT_ATOMIC_WRITE` during an atomic commit.
 
+## Operation breakdown
+
+This section names every Google Sheets API method the VFS layer can call through `GoogleSdkSheetsClient`. Counts below are network request counts, not the number of subrequests inside a batch.
+
+| Operation path | Google Sheets API calls | Notes |
+| --- | --- | --- |
+| `createGoogleSheetsVfsSpreadsheet()` | `spreadsheets.create` + `spreadsheets.values.batchUpdate` | Creates a spreadsheet with the default block tab, then initializes the lock cell to `LSV1|`. |
+| `ensureGoogleSheetsVfsTabs()` | `spreadsheets.get`, optional `spreadsheets.batchUpdate`, `spreadsheets.values.batchGet`, optional `spreadsheets.values.batchUpdate` | Reads existing tabs, creates the block tab if missing, reads the lock cell, and initializes it if it is missing or invalid. |
+| `GoogleSheetsSQLiteVFS.create()` / first VFS use | No direct call in the constructor. The first operation that needs Sheets calls `prepareForUse()` and then the operation-specific calls below. | `GoogleSdkSheetsClient` is lazy except where setup helpers are called. |
+| `jOpen` for temporary files | None | Temp files are kept in memory. |
+| `jOpen` for an existing persistent file | `spreadsheets.values.batchGet` | Reads the slot metadata row to discover file size. |
+| `jOpen` with `SQLITE_OPEN_CREATE` when metadata is missing | `spreadsheets.values.batchGet`, then lock acquisition calls, then `spreadsheets.values.batchUpdate` | Reads metadata, acquires an exclusive lease, and writes an empty metadata row. Lock acquisition can call `spreadsheets.get` if the sheet id is not cached and always calls `spreadsheets.batchUpdate` per attempt. |
+| `jRead` satisfied by dirty/cache/temp/zero block | None | Dirty, cached, temp, and beyond-EOF reads avoid Sheets. |
+| `jRead` of an uncached persistent block | `spreadsheets.values.batchGet` | Reads exactly the touched block cell; multi-block SQLite reads currently issue one block read per uncached block. |
+| `jWrite` full block append/overwrite | Lock acquisition calls only | Marks dirty blocks in memory. The persistent Sheets write is deferred to `jSync` or atomic commit. |
+| `jWrite` partial overwrite of an existing persistent block | Lock acquisition calls + `spreadsheets.values.batchGet` for each uncached partial block | Partial writes must read the visible block first so unchanged bytes can be preserved. |
+| `jTruncate` | Lock acquisition calls only | Marks size and dirty state in memory; metadata is persisted on flush. |
+| `jSync` with no dirty blocks and no dirty size | None after local checks | No-op flush does not hit Sheets. |
+| `jSync` for persistent dirty data | optional `spreadsheets.get`, `spreadsheets.batchUpdate` | Ensures/renews an exclusive lease and writes dirty block cells plus metadata in one `spreadsheets.batchUpdate`. The same batch can include the lock renewal `findReplace` request. |
+| `jClose` | Same as `jSync`, then optional unlock calls | Close flushes dirty state, removes the file handle, and releases the lease when no persistent files remain. |
+| `jFileSize`, `jSectorSize`, `jDeviceCharacteristics`, `jGetLastError` | None | These are local VFS responses. |
+| `jLock` | optional `spreadsheets.get`, `spreadsheets.batchUpdate` per attempt | Uses `findReplace` requests to clean expired leases and acquire the target SQLite rollback lock. Exclusive lock acquisition uses pending-then-exclusive subrequests in the same batch. |
+| `jUnlock(SQLITE_LOCK_NONE)` | Deferred `spreadsheets.batchUpdate` | Schedules lease release; the release removes this owner from the lock cell and cleans expired leases. If `lockReleaseDelayMs` is `0`, this happens immediately. |
+| `jUnlock(SQLITE_LOCK_SHARED)` | optional `spreadsheets.get`, `spreadsheets.batchUpdate` | Downgrades this owner's durable lock entry to shared and cleans expired leases. |
+| `jAccess` for temporary or unsupported paths | None | Non-persistent paths return not found without Sheets. |
+| `jAccess` for persistent paths | `spreadsheets.values.batchGet` | Reads the metadata row for the mapped persistent slot. |
+| `jDelete` for temporary or unsupported paths | None | Non-persistent paths are treated as already absent. |
+| `jDelete` for persistent paths | Lock acquisition calls + `spreadsheets.values.batchUpdate` | Acquires exclusive lease, clears the metadata size cell, and clears open volatile state for that slot. |
+| `jCheckReservedLock` when this handle already has reserved-or-higher lock | None | Uses local lease state. |
+| `jCheckReservedLock` otherwise | optional `spreadsheets.get`, `spreadsheets.batchUpdate` | Cleans expired leases, probes for any reserved/pending/exclusive entry with a regex `findReplace`, then restores the probe marker in the same batch. |
+| `SQLITE_FCNTL_BEGIN_ATOMIC_WRITE` | Lock acquisition calls | Acquires exclusive lease and marks the main file as being in atomic write mode. |
+| `SQLITE_FCNTL_COMMIT_ATOMIC_WRITE` | optional `spreadsheets.get`, `spreadsheets.batchUpdate` | Flushes dirty blocks and metadata through one batch, optionally prepending an exclusive lease renewal request. |
+| `SQLITE_FCNTL_ROLLBACK_ATOMIC_WRITE` | None | Discards in-memory atomic-write state. |
+| `GoogleSdkSheetsClient.append()` | `spreadsheets.values.append` | Exposed by the client wrapper but not used by the current VFS read/write/lock paths. |
+
+### Lock API call details
+
+Lock acquisition and renewal are intentionally expressed as Sheets `spreadsheets.batchUpdate` calls using `findReplace` subrequests against the lock cell, rather than `values.get` followed by `values.update`. This keeps each lock attempt to a single conditional network write after the sheet id is known.
+
+| Lock helper path | Batch subrequests |
+| --- | --- |
+| Acquire shared/reserved/pending | `cleanupExpiredRequest` + one regex `findReplace` for the target lock. |
+| Acquire exclusive | `cleanupExpiredRequest` + one regex `findReplace` to become pending + one regex `findReplace` to become exclusive if this owner is the only pending entry. |
+| Renew current lock | `cleanupExpiredRequest` + one exact `findReplace` from the old lease expiration to the new expiration. |
+| Release to none | One regex `findReplace` removing this owner's entry + `cleanupExpiredRequest`. |
+| Downgrade to shared | One exact `findReplace` from the current entry to `S` + `cleanupExpiredRequest`. |
+| Check reserved lock | `cleanupExpiredRequest` + regex probe for `[RPX]` + exact cleanup of the temporary probe marker. |
+| Write-batch exclusive renewal | One regex `findReplace` prepended to the dirty block/metadata `updateCells` requests. |
+
 ## Browser usage
 
 ```ts
