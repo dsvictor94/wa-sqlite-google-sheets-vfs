@@ -71,17 +71,35 @@ export class GoogleSheetsLease {
 
     const sheetId = await this.client.getSheetId(this.blockSheetName);
     const requests: SpreadsheetRequest[] = [];
+    let downgradeReplyIndex: number | null = null;
+
     if (target === SQLITE_LOCK_NONE) {
       requests.push(this.regexFindReplaceRequest(sheetId, `[SRPX]:${EXP}:${this.ownerKey};`, "", false));
     } else {
       const current = this.currentEntry();
-      if (current !== null) requests.push(this.exactFindReplaceRequest(sheetId, this.entry(current.letter, current.expiresAtSec), this.entry("S", current.expiresAtSec), false));
-    }
-    requests.push(this.cleanupExpiredRequest(sheetId));
-    await this.client.spreadsheetBatchUpdate(requests);
+      if (current === null) {
+        this.clearLocal();
+        throw new Error("Google Sheets VFS cannot downgrade a missing local lock entry");
+      }
 
-    if (target === SQLITE_LOCK_NONE) this.clearLocal();
-    else this.localLock = SQLITE_LOCK_SHARED;
+      downgradeReplyIndex = requests.length;
+      requests.push(this.exactFindReplaceRequest(sheetId, this.entry(current.letter, current.expiresAtSec), this.entry("S", current.expiresAtSec), false));
+    }
+
+    requests.push(this.cleanupExpiredRequest(sheetId));
+    const response = await this.client.spreadsheetBatchUpdate(requests);
+
+    if (target === SQLITE_LOCK_NONE) {
+      this.clearLocal();
+      return;
+    }
+
+    if (downgradeReplyIndex === null || !changed(response, downgradeReplyIndex)) {
+      this.clearLocal();
+      throw new Error("Google Sheets VFS lock downgrade failed; local lease no longer matches durable state");
+    }
+
+    this.localLock = SQLITE_LOCK_SHARED;
   }
 
   async checkReservedLock(): Promise<boolean> {
@@ -161,7 +179,7 @@ export class GoogleSheetsLease {
   }
 
   private cleanupExpiredRequest(sheetId: number): SpreadsheetRequest {
-    const cutoffSec = fixedWidthUnixSec(Date.now() - this.renewBeforeExpiryMs);
+    const cutoffSec = fixedWidthUnixSec(Date.now());
     return this.regexFindReplaceRequest(sheetId, `[SRPX]:(?:${fixedWidthDecimalLeRegex(cutoffSec)}):${OWNER};`, "", false);
   }
 
