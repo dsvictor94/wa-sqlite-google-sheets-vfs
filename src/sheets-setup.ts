@@ -12,7 +12,7 @@ export async function ensureGoogleSheetsVfsTabs(spreadsheetId: string): Promise<
 
   const [cell] = await client.batchGet([`${sheet}!${LOCK_STATE_CELL}`]);
   const current = cell?.values?.[0]?.[0];
-  if (current === undefined || current === null || current === "") {
+  if (typeof current !== "string" || !current.startsWith(LOCK_CELL_PREFIX)) {
     await client.batchUpdate([{ range: `${sheet}!${LOCK_STATE_CELL}`, values: [[LOCK_CELL_PREFIX]] }]);
   }
 }
