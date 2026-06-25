@@ -1,0 +1,42 @@
+name: Apply zipped patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: Branch to update
+        required: true
+        default: codex/patch-artifact
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Unpack patch
+        run: |
+          unzip -o patches/update.zip -d /tmp/update-patch
+          test -f /tmp/update-patch/ideal-remaining.patch
+
+      - name: Apply patch
+        run: |
+          git apply /tmp/update-patch/ideal-remaining.patch
+
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Apply zipped patch"
+          git push origin "HEAD:${{ inputs.target_branch }}"
