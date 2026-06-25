@@ -17,9 +17,9 @@ import { GoogleSheetsLease, type GoogleSheetsWriteBatchRenewal } from "./sheets-
 import type { GoogleSheetsVFSMetricDetail, GoogleSheetsVFSMetrics, GoogleSheetsVFSOptions } from "./types.js";
 import { blocksTouched, copyFixedBlock, normalizePath } from "./util.js";
 
-const SQLITE_LOCK_NONE = VFS.SQLITE_LOCK_NONE;
-const SQLITE_LOCK_RESERVED = VFS.SQLITE_LOCK_RESERVED;
-const SQLITE_LOCK_EXCLUSIVE = VFS.SQLITE_LOCK_EXCLUSIVE;
+const SQLITE_LOCK_NONE = SQLite.SQLITE_LOCK_NONE;
+const SQLITE_LOCK_RESERVED = SQLite.SQLITE_LOCK_RESERVED;
+const SQLITE_LOCK_EXCLUSIVE = SQLite.SQLITE_LOCK_EXCLUSIVE;
 
 type SqliteResult = number;
 
