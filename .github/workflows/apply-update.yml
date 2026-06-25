@@ -26,7 +26,12 @@ jobs:
       - name: Apply patch
         run: |
           test -f "${{ inputs.patch_gz_path }}"
-          gunzip -c "${{ inputs.patch_gz_path }}" | git apply
+          gunzip -c "${{ inputs.patch_gz_path }}" > /tmp/update.patch
+          if git apply --check /tmp/update.patch; then
+            git apply /tmp/update.patch
+          else
+            patch -p1 --forward --fuzz=3 --no-backup-if-mismatch < /tmp/update.patch
+          fi
           rm "${{ inputs.patch_gz_path }}"
 
       - name: Commit and push
