@@ -182,16 +182,6 @@ export class GoogleSheetsLease {
     this.activeDataSheetId = renewal.dataSheetId;
   }
 
-  async verifyCurrentOwner(): Promise<boolean> {
-    if (!this.isHeld) {
-      this.clearLocalState();
-      return false;
-    }
-
-    const [control] = await this.client.batchGet([this.controlRange]);
-    return this.applyOwnerCheck(control?.values?.[0]?.[0]);
-  }
-
   applyOwnerCheck(controlValue: unknown): boolean {
     if (!this.isHeld) {
       this.clearLocalState();
