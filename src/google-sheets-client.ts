@@ -1,7 +1,10 @@
 import {
   BLOCK_SHEET_INITIAL_COLUMNS,
   BLOCK_SHEET_INITIAL_ROWS,
-  DEFAULT_BLOCK_SHEET_NAME,
+  CONTROL_SHEET_ID,
+  CONTROL_SHEET_NAME,
+  DATA_SHEET_NAME,
+  INITIAL_DATA_SHEET_ID,
   LOCK_CELL_PREFIX,
   LOCK_STATE_CELL,
 } from "./constants.js";
@@ -15,11 +18,20 @@ import type {
 } from "./types.js";
 import { quoteSheetName } from "./util.js";
 
+export function formatControlState(dataSheetId: number, entries = ""): string {
+  if (!Number.isSafeInteger(dataSheetId) || dataSheetId < 0) {
+    throw new RangeError(`invalid Google Sheets data sheet id ${dataSheetId}`);
+  }
+
+  return `${LOCK_CELL_PREFIX}D:${dataSheetId}|${entries}`;
+}
+
 type GoogleApiResponse<T> = { result: T };
 
 type GoogleSheetProperties = {
   sheetId?: number;
   title?: string;
+  index?: number;
   gridProperties?: {
     rowCount?: number;
     columnCount?: number;
@@ -77,10 +89,29 @@ type FindReplaceRequest = {
   range: GridRange;
 };
 
+type DuplicateSheetRequest = {
+  sourceSheetId: number;
+  insertSheetIndex?: number;
+  newSheetId?: number;
+  newSheetName?: string;
+};
+
+type DeleteSheetRequest = {
+  sheetId: number;
+};
+
+type UpdateSheetPropertiesRequest = {
+  properties: GoogleSheetProperties;
+  fields: string;
+};
+
 export type SpreadsheetRequest =
   | { addSheet: { properties: GoogleSheetProperties } }
+  | { deleteSheet: DeleteSheetRequest }
+  | { duplicateSheet: DuplicateSheetRequest }
   | { findReplace: FindReplaceRequest }
-  | { updateCells: UpdateCellsRequest };
+  | { updateCells: UpdateCellsRequest }
+  | { updateSheetProperties: UpdateSheetPropertiesRequest };
 
 type FindReplaceResponse = {
   valuesChanged?: number;
@@ -92,6 +123,7 @@ type FindReplaceResponse = {
 
 export type SpreadsheetBatchUpdateResult = {
   replies?: Array<{
+    duplicateSheet?: { properties?: GoogleSheetProperties };
     findReplace?: FindReplaceResponse;
   }>;
 };
@@ -145,7 +177,8 @@ export async function createGoogleSheetsVfsSpreadsheet(title = `wa-sqlite VFS de
     resource: {
       properties: { title },
       sheets: [
-        { properties: { title: DEFAULT_BLOCK_SHEET_NAME, gridProperties: { rowCount: BLOCK_SHEET_INITIAL_ROWS, columnCount: BLOCK_SHEET_INITIAL_COLUMNS } } },
+        { properties: { sheetId: CONTROL_SHEET_ID, title: CONTROL_SHEET_NAME, gridProperties: { rowCount: 1, columnCount: 1 } } },
+        { properties: { sheetId: INITIAL_DATA_SHEET_ID, title: DATA_SHEET_NAME, gridProperties: { rowCount: BLOCK_SHEET_INITIAL_ROWS, columnCount: BLOCK_SHEET_INITIAL_COLUMNS } } },
       ],
     },
   });
@@ -154,8 +187,8 @@ export async function createGoogleSheetsVfsSpreadsheet(title = `wa-sqlite VFS de
   const client = new GoogleSdkSheetsClient(spreadsheetId);
   await client.batchUpdate([
     {
-      range: `${quoteSheetName(DEFAULT_BLOCK_SHEET_NAME)}!${LOCK_STATE_CELL}`,
-      values: [[LOCK_CELL_PREFIX]],
+      range: `${quoteSheetName(CONTROL_SHEET_NAME)}!${LOCK_STATE_CELL}`,
+      values: [[formatControlState(INITIAL_DATA_SHEET_ID)]],
     },
   ]);
 
@@ -173,23 +206,25 @@ export class GoogleSdkSheetsClient {
     private readonly metrics?: GoogleSheetsVFSMetrics,
   ) {}
 
-  async ensureSheetTabs(tabs: Array<{ title: string; rows: number; cols: number }>): Promise<void> {
+  async ensureSheetTabs(tabs: Array<{ title: string; rows: number; cols: number; sheetId?: number }>): Promise<void> {
     const spreadsheet = await this.getSpreadsheetSheets("sheets.properties(sheetId,title)");
-    const existing = new Set(
-      (spreadsheet.sheets ?? [])
-        .map((sheet) => {
-          const title = sheet.properties?.title;
-          const sheetId = sheet.properties?.sheetId;
-          if (title !== undefined && sheetId !== undefined) this.sheetIdsByTitle.set(title, sheetId);
-          return title;
-        })
-        .filter((title): title is string => Boolean(title)),
-    );
+    const existing = new Map<string, number>();
+
+    for (const sheet of spreadsheet.sheets ?? []) {
+      const title = sheet.properties?.title;
+      const sheetId = sheet.properties?.sheetId;
+      if (title !== undefined && sheetId !== undefined) {
+        existing.set(title, sheetId);
+        this.sheetIdsByTitle.set(title, sheetId);
+      }
+    }
+
     const requests = tabs
       .filter((tab) => !existing.has(tab.title))
       .map((tab) => ({
         addSheet: {
           properties: {
+            sheetId: tab.sheetId,
             title: tab.title,
             gridProperties: { rowCount: tab.rows, columnCount: tab.cols },
           },
@@ -198,7 +233,7 @@ export class GoogleSdkSheetsClient {
 
     if (requests.length) {
       await this.spreadsheetBatchUpdate(requests);
-      this.sheetIdsByTitle.clear();
+      this.clearSheetIdCache();
     }
   }
 
@@ -216,6 +251,19 @@ export class GoogleSdkSheetsClient {
     const sheetId = this.sheetIdsByTitle.get(title);
     if (sheetId === undefined) throw new Error(`Google Sheet tab not found: ${title}`);
     return sheetId;
+  }
+
+  rememberSheetId(title: string, sheetId: number): void {
+    this.sheetIdsByTitle.set(title, sheetId);
+  }
+
+  clearSheetIdCache(title?: string): void {
+    if (title === undefined) {
+      this.sheetIdsByTitle.clear();
+      return;
+    }
+
+    this.sheetIdsByTitle.delete(title);
   }
 
   async spreadsheetBatchUpdate(requests: SpreadsheetRequest[]): Promise<SpreadsheetBatchUpdateResult> {
