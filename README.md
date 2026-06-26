@@ -2,7 +2,7 @@
 
 SQLite storage on Google Sheets, powered by a custom wa-sqlite VFS.
 
-This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google JavaScript SDK and Google Identity Services, then stores SQLite file data as base64-encoded 1024-byte blocks in a Google Sheets tab.
+This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google JavaScript SDK and Google Identity Services, then stores SQLite file data as base64-encoded 4096-byte blocks in a Google Sheets tab.
 
 ## Demo
 
@@ -120,7 +120,7 @@ P:<expiresAtSec>:<owner>;
 X:<expiresAtSec>:<owner>;
 ```
 
-Rows 2-5 store file metadata. Block data starts at row 6. Each data cell stores one base64-encoded 1024-byte block.
+Rows 2-5 store file metadata. Block data starts at row 6. Each data cell stores one base64-encoded 4096-byte block.
 
 ## Usage notes
 

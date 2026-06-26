@@ -16,7 +16,7 @@ export type GoogleSheetsVFSOptions = {
   blockSheetName?: string;
   lockSheetName?: string;
   databaseId?: string;
-  blockBytes?: 1024;
+  blockBytes?: 4096;
   blocksPerStripe?: number;
   stripesPerFile?: number;
   cacheBlocks?: number;
