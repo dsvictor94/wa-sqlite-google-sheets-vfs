@@ -29,11 +29,7 @@ type ControlState = {
 };
 type RecoveryCandidate = {
   oldDataSheetId: number;
-  oldHashes: string;
-  oldExpiresAtSec: string;
-  oldOwner: string;
   newHashes: string;
-  replyIndex: number;
 };
 
 type CellData = { userEnteredValue: { stringValue?: string; numberValue?: number; boolValue?: boolean } };
@@ -87,20 +83,27 @@ export class GoogleSheetsLease {
     const deadline = Date.now() + this.lockTimeoutMs;
     let attempt = 0;
     do {
-      const state = await this.readControlState();
+      const expiresAtSec = this.nextExpiresAtSec();
+      const recoveryCutoffSec = fixedWidthUnixSec(Date.now());
+      const requests: SpreadsheetRequest[] = [this.cleanupExpiredNonExclusiveRequest()];
+      const recoveryStartIndex = requests.length;
+      requests.push(this.expiredExclusiveRecoveryRequest(recoveryCutoffSec, expiresAtSec));
+      requests.push(this.expiredBarrierRecoveryRequest(recoveryCutoffSec, expiresAtSec));
+      const normalStartIndex = requests.length;
+      requests.push(...this.acquireRequests(target, expiresAtSec));
+
+      const response = await this.client.spreadsheetBatchUpdate(requests, {
+        includeSpreadsheetInResponse: true,
+        responseRanges: [this.controlRange],
+        responseIncludeGridData: true,
+      });
+      const state = this.controlStateFromBatchUpdate(response);
       this.activeDataSheetId = state.dataSheetId;
 
-      const expiresAtSec = this.nextExpiresAtSec();
-      const requests: SpreadsheetRequest[] = [this.cleanupExpiredNonExclusiveRequest()];
-      const recovery = this.recoveryCandidate(state, requests.length);
-      if (recovery !== null) requests.push(this.recoveryRequest(recovery, expiresAtSec));
-      const normalStartIndex = requests.length;
-      requests.push(...this.acquireRequests(state.dataSheetId, target, expiresAtSec));
-
-      const response = await this.client.spreadsheetBatchUpdate(requests);
-      if (recovery !== null && changed(response, recovery.replyIndex)) {
-        if (await this.completeRecoveryAcquire(target, recovery)) return true;
-      } else if (this.applyAcquireResponse(target, expiresAtSec, normalStartIndex, response)) {
+      if (changed(response, recoveryStartIndex) || changed(response, recoveryStartIndex + 1)) {
+        const recovery = this.recoveryCandidateFromBarrierState(state);
+        if (recovery !== null && await this.completeRecoveryAcquire(target, recovery)) return true;
+      } else if (this.applyAcquireResponse(target, expiresAtSec, normalStartIndex, response, state)) {
         return true;
       }
 
@@ -228,55 +231,63 @@ export class GoogleSheetsLease {
     return true;
   }
 
-  private acquireRequests(dataSheetId: number, target: number, expiresAtSec: string): SpreadsheetRequest[] {
+  private acquireRequests(target: number, expiresAtSec: string): SpreadsheetRequest[] {
     const otherOwner = `(?!${escapeRegex(this.ownerKey)};)${OWNER}`;
     const otherS = `S:${EXP}:${otherOwner};`;
     const otherSR = `(?:S|R):${EXP}:${otherOwner};`;
-    const prefix = this.statePrefix(dataSheetId);
-    if (target === SQLITE_LOCK_SHARED) return [this.regexFindReplaceRequest(`^${prefix}((?:${otherSR})*)(?:S:${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherSR})*)$`, `${formatControlState(dataSheetId)}$1${this.entry("S", expiresAtSec)}$2`, true)];
-    if (target === SQLITE_LOCK_RESERVED) return [this.regexFindReplaceRequest(`^${prefix}((?:${otherS})*)(?:(?:S|R):${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherS})*)$`, `${formatControlState(dataSheetId)}$1${this.entry("R", expiresAtSec)}$2`, true)];
-    if (target === SQLITE_LOCK_PENDING) return [this.regexFindReplaceRequest(`^${prefix}((?:${otherS})*)(?:(?:S|R|P):${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherS})*)$`, `${formatControlState(dataSheetId)}$1${this.entry("P", expiresAtSec)}$2`, true)];
+    const prefix = `(${this.anyStatePrefix()})`;
+    if (target === SQLITE_LOCK_SHARED) return [this.regexFindReplaceRequest(`^${prefix}((?:${otherSR})*)(?:S:${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherSR})*)$`, `$1$2${this.entry("S", expiresAtSec)}$3`, true)];
+    if (target === SQLITE_LOCK_RESERVED) return [this.regexFindReplaceRequest(`^${prefix}((?:${otherS})*)(?:(?:S|R):${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherS})*)$`, `$1$2${this.entry("R", expiresAtSec)}$3`, true)];
+    if (target === SQLITE_LOCK_PENDING) return [this.regexFindReplaceRequest(`^${prefix}((?:${otherS})*)(?:(?:S|R|P):${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherS})*)$`, `$1$2${this.entry("P", expiresAtSec)}$3`, true)];
     return [
-      this.regexFindReplaceRequest(`^${prefix}((?:${otherS})*)(?:(?:S|R|P):${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherS})*)$`, `${formatControlState(dataSheetId)}$1${this.entry("P", expiresAtSec)}$2`, true),
-      this.regexFindReplaceRequest(`^${prefix}P:${expiresAtSec}:${escapeRegex(this.ownerKey)};$`, `${formatControlState(dataSheetId, this.entry("X", expiresAtSec))}`, true),
+      this.regexFindReplaceRequest(`^${prefix}((?:${otherS})*)(?:(?:S|R|P):${EXP}:${escapeRegex(this.ownerKey)};)?((?:${otherS})*)$`, `$1$2${this.entry("P", expiresAtSec)}$3`, true),
+      this.regexFindReplaceRequest(`^(${this.anyStatePrefix()})P:${expiresAtSec}:${escapeRegex(this.ownerKey)};$`, `$1${this.entry("X", expiresAtSec)}`, true),
     ];
   }
 
-  private applyAcquireResponse(target: number, expiresAtSec: string, normalStartIndex: number, response: SpreadsheetBatchUpdateResult): boolean {
+  private applyAcquireResponse(target: number, expiresAtSec: string, normalStartIndex: number, response: SpreadsheetBatchUpdateResult, state: ControlState): boolean {
     if (target === SQLITE_LOCK_EXCLUSIVE) {
-      if (changed(response, normalStartIndex + 1)) { this.localLock = SQLITE_LOCK_EXCLUSIVE; this.expiresAtSec = expiresAtSec; return true; }
-      if (changed(response, normalStartIndex)) { this.localLock = SQLITE_LOCK_PENDING; this.expiresAtSec = expiresAtSec; }
+      if (changed(response, normalStartIndex + 1)) {
+        this.localLock = SQLITE_LOCK_EXCLUSIVE;
+        this.expiresAtSec = expiresAtSec;
+        this.activeDataSheetId = state.dataSheetId;
+        return true;
+      }
+      if (changed(response, normalStartIndex)) {
+        this.localLock = SQLITE_LOCK_PENDING;
+        this.expiresAtSec = expiresAtSec;
+        this.activeDataSheetId = state.dataSheetId;
+      }
       return false;
     }
     if (!changed(response, normalStartIndex)) return false;
     this.localLock = target;
     this.expiresAtSec = expiresAtSec;
+    this.activeDataSheetId = state.dataSheetId;
     return true;
   }
 
-  private recoveryCandidate(state: ControlState, replyIndex: number): RecoveryCandidate | null {
+  private recoveryCandidateFromBarrierState(state: ControlState): RecoveryCandidate | null {
     if (state.entries.length !== 1) return null;
     const [entry] = state.entries;
-    if (!isExpired(entry)) return null;
-
-    if (entry.letter === "X") {
-      return { oldDataSheetId: state.dataSheetId, oldHashes: "", oldExpiresAtSec: entry.expiresAtSec, oldOwner: entry.owner, newHashes: "#", replyIndex };
-    }
-
-    if (entry.letter === "B") {
-      return { oldDataSheetId: state.dataSheetId, oldHashes: entry.hashes, oldExpiresAtSec: entry.expiresAtSec, oldOwner: entry.owner, newHashes: `${entry.hashes}#`, replyIndex };
-    }
-
-    return null;
+    if (entry.letter !== "B" || entry.owner !== this.ownerKey || entry.hashes.length === 0) return null;
+    return { oldDataSheetId: state.dataSheetId, newHashes: entry.hashes };
   }
 
-  private recoveryRequest(recovery: RecoveryCandidate, barrierExpiresAtSec: string): SpreadsheetRequest {
-    const oldEntryPattern = recovery.oldHashes.length === 0
-      ? `X:${recovery.oldExpiresAtSec}:${escapeRegex(recovery.oldOwner)};`
-      : `B${escapeRegex(recovery.oldHashes)}:${recovery.oldExpiresAtSec}:${escapeRegex(recovery.oldOwner)};`;
+  private expiredExclusiveRecoveryRequest(cutoffSec: string, barrierExpiresAtSec: string): SpreadsheetRequest {
+    const expired = fixedWidthDecimalLeRegex(cutoffSec);
     return this.regexFindReplaceRequest(
-      `^${this.statePrefix(recovery.oldDataSheetId)}${oldEntryPattern}$`,
-      formatControlState(recovery.oldDataSheetId, `B${recovery.newHashes}:${barrierExpiresAtSec}:${this.ownerKey};`),
+      `^(${this.anyStatePrefix()})X:${expired}:${OWNER};$`,
+      `$1B#:${barrierExpiresAtSec}:${this.ownerKey};`,
+      true,
+    );
+  }
+
+  private expiredBarrierRecoveryRequest(cutoffSec: string, barrierExpiresAtSec: string): SpreadsheetRequest {
+    const expired = fixedWidthDecimalLeRegex(cutoffSec);
+    return this.regexFindReplaceRequest(
+      `^(${this.anyStatePrefix()})B(#+):${expired}:${OWNER};$`,
+      `$1B$2#:${barrierExpiresAtSec}:${this.ownerKey};`,
       true,
     );
   }
@@ -314,10 +325,9 @@ export class GoogleSheetsLease {
     return true;
   }
 
-  private async readControlState(): Promise<ControlState> {
-    const [cell] = await this.client.batchGet([this.controlRange]);
-    const state = parseControlState(cell?.values?.[0]?.[0]);
-    if (state === null) throw new Error("Invalid Google Sheets VFS control state");
+  private controlStateFromBatchUpdate(response: SpreadsheetBatchUpdateResult): ControlState {
+    const state = parseControlState(controlValueFromBatchUpdate(response));
+    if (state === null) throw new Error("Invalid Google Sheets VFS control state returned by lock batch update");
     return state;
   }
 
@@ -355,8 +365,8 @@ export class GoogleSheetsLease {
   }
 
   private entry(letter: LockLetter, expiresAtSec: string): string { return `${letter}:${expiresAtSec}:${this.ownerKey};`; }
-  private statePrefix(dataSheetId: number): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:${dataSheetId}\\|`; }
-  private anyStatePrefix(): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:[0-9]+\\|`; }
+  private statePrefix(dataSheetId: number): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:${dataSheetId}\|`; }
+  private anyStatePrefix(): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:[0-9]+\|`; }
   private hasUsableLocalLease(): boolean { return this.expiresAtSec !== null && Date.now() < Number(this.expiresAtSec) * 1000; }
   private shouldRenewLocalLease(): boolean { return this.expiresAtSec !== null && Date.now() >= Number(this.expiresAtSec) * 1000 - this.renewBeforeExpiryMs; }
   private dropExpiredLocalLock(): void { if (this.localLock !== SQLITE_LOCK_NONE && !this.hasUsableLocalLease()) this.clearLocalState(); }
@@ -366,7 +376,7 @@ export class GoogleSheetsLease {
 function parseControlState(value: unknown): ControlState | null {
   if (typeof value !== "string" || !value.startsWith(LOCK_CELL_PREFIX)) return null;
 
-  const match = new RegExp(`^${escapeRegex(LOCK_CELL_PREFIX)}D:([0-9]+)\\|(.*)$`).exec(value);
+  const match = new RegExp(`^${escapeRegex(LOCK_CELL_PREFIX)}D:([0-9]+)\|(.*)$`).exec(value);
   if (match === null) return null;
 
   const dataSheetId = Number(match[1]);
@@ -390,8 +400,24 @@ function parseControlState(value: unknown): ControlState | null {
   return { dataSheetId, entries };
 }
 
+function controlValueFromBatchUpdate(response: SpreadsheetBatchUpdateResult): unknown {
+  for (const sheet of response.updatedSpreadsheet?.sheets ?? []) {
+    for (const data of sheet.data ?? []) {
+      for (const row of data.rowData ?? []) {
+        for (const cell of row.values ?? []) {
+          const value = cell.userEnteredValue ?? cell.effectiveValue;
+          if (value?.stringValue !== undefined) return value.stringValue;
+          if (value?.numberValue !== undefined) return value.numberValue;
+          if (value?.boolValue !== undefined) return value.boolValue;
+          if (cell.formattedValue !== undefined) return cell.formattedValue;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
 function changed(response: SpreadsheetBatchUpdateResult, replyIndex: number): boolean { return response.replies?.[replyIndex]?.findReplace?.occurrencesChanged === 1; }
-function isExpired(entry: ControlEntry): boolean { return Date.now() >= Number(entry.expiresAtSec) * 1000; }
 function lockLetter(lock: number): LockLetter | null { if (lock === SQLITE_LOCK_SHARED) return "S"; if (lock === SQLITE_LOCK_RESERVED) return "R"; if (lock === SQLITE_LOCK_PENDING) return "P"; if (lock === SQLITE_LOCK_EXCLUSIVE) return "X"; return null; }
 function normalizeLock(lock: number): number { if (lock === SQLITE_LOCK_SHARED || lock === SQLITE_LOCK_RESERVED || lock === SQLITE_LOCK_PENDING || lock === SQLITE_LOCK_EXCLUSIVE) return lock; throw new Error(`Invalid SQLite lock level ${lock}`); }
 function normalizeUnlockTarget(lock: number): number { if (lock === SQLITE_LOCK_NONE || lock === SQLITE_LOCK_SHARED) return lock; throw new Error(`Invalid SQLite unlock target ${lock}`); }
