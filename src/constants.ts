@@ -1,4 +1,4 @@
-export const GOOGLE_SHEETS_BLOCK_BYTES = 1024 as const;
+export const GOOGLE_SHEETS_BLOCK_BYTES = 4096 as const;
 export const DEFAULT_BLOCK_SHEET_NAME = "__sqlite_blocks";
 export const DEFAULT_LOCK_SHEET_NAME = "__sqlite_blocks";
 export const DEFAULT_BLOCKS_PER_STRIPE = 256;
