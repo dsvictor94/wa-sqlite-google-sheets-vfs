@@ -193,11 +193,12 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   async jDelete(filename: string, _syncDir: number): Promise<SqliteResult> {
     return await this.measured("jDelete", {}, VFS.SQLITE_IOERR_DELETE, async () => {
       await this.prepare();
-      const slot = slotForPath(normalizePath(filename), this.mainPath);
+      const path = normalizePath(filename);
+      const slot = slotForPath(path, this.mainPath);
       if (slot === null) return VFS.SQLITE_OK;
       const renewal = await this.createWriteBatchRenewal("jDelete");
       if (renewal === null) return VFS.SQLITE_BUSY;
-      const response = await this.store.deleteMetadata(renewal.dataSheetId, slot, filename, renewal.requests);
+      const response = await this.store.deleteMetadata(renewal.dataSheetId, slot, path, renewal.requests);
       this.lease.completeWriteBatchRenewal(response, renewal);
       this.clearOpenFilesForSlot(slot);
       return VFS.SQLITE_OK;
@@ -277,19 +278,15 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   private async readVisibleBlock(file: VfsFileState, blockIndex: number): Promise<Uint8Array> {
     const dirty = file.dirtyBlocks.get(blockIndex);
-    if (dirty) { await this.ensureReadOwner(file); return dirty.slice(); }
-    if (blockIndex * GOOGLE_SHEETS_BLOCK_BYTES >= file.size) { await this.ensureReadOwner(file); return new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES); }
+    if (dirty) return dirty.slice();
+    if (blockIndex * GOOGLE_SHEETS_BLOCK_BYTES >= file.size) return new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
     if (file.slot === null) return file.tempBlocks.get(blockIndex)?.slice() ?? new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
     const cached = file.cache.get(blockIndex);
-    if (cached) { await this.ensureReadOwner(file); return cached; }
+    if (cached) return cached;
     const { block, controlValue } = await this.store.readBlockAndControl(file.slot, blockIndex, this.lease.controlRange);
     if (!this.lease.applyOwnerCheck(controlValue)) return await this.retryReadAfterLostLease(file, blockIndex);
     file.cache.set(blockIndex, block);
     return block;
-  }
-
-  private async ensureReadOwner(file: VfsFileState): Promise<void> {
-    if (file.isPersistent && !(await this.lease.verifyCurrentOwner())) await this.resetPersistentStateAfterLostLease("readOwner");
   }
 
   private async retryReadAfterLostLease(file: VfsFileState, blockIndex: number): Promise<Uint8Array> {
