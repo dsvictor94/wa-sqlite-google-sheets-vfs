@@ -1,6 +1,5 @@
 import { DEFAULT_BLOCK_SHEET_NAME, GOOGLE_SHEETS_BLOCK_BYTES, PersistentFileSlot, BLOCK_DATA_START_ROW, BLOCK_METADATA_START_ROW } from "./constants.js";
 import { GoogleSdkSheetsClient, type SpreadsheetBatchUpdateResult, type SpreadsheetRequest } from "./google-sheets-client.js";
-import type { SheetValueUpdate } from "./types.js";
 import { base64ToBytes, bytesToBase64, columnName, copyFixedBlock, quoteSheetName } from "./util.js";
 
 export type FileMetadata = {
@@ -41,52 +40,51 @@ export class GoogleSheetsBlockStore {
 
   async readMetadata(slot: PersistentFileSlot): Promise<FileMetadata | null> {
     const [range] = await this.client.batchGet([this.metadataRange(slot)]);
-    const row = range?.values?.[0];
-    const rawSize = row?.[2];
-
-    if (rawSize === undefined || rawSize === null || rawSize === "") return null;
-
-    const size = Number(rawSize);
-    if (!Number.isFinite(size) || size < 0) {
-      throw new Error(`Invalid size for Google Sheets VFS slot ${slot}: ${String(rawSize)}`);
-    }
-
-    return {
-      slot,
-      path: typeof row?.[1] === "string" ? row[1] : "",
-      size,
-    };
-  }
-
-  async writeMetadata(slot: PersistentFileSlot, path: string, size: number): Promise<void> {
-    await this.client.batchUpdate([this.metadataUpdate(slot, path, size)]);
-  }
-
-  async deleteMetadata(slot: PersistentFileSlot, path: string): Promise<void> {
-    await this.client.batchUpdate([
-      {
-        range: this.metadataRange(slot),
-        values: [[slot, path, ""]],
-      },
-    ]);
+    return this.parseMetadata(slot, range?.values?.[0]);
   }
 
   async readBlock(slot: PersistentFileSlot, blockIndex: number): Promise<Uint8Array> {
     const [range] = await this.client.batchGet([this.blockRange(slot, blockIndex)]);
-    const raw = range?.values?.[0]?.[0];
+    return decodeBlock(range?.values?.[0]?.[0]);
+  }
 
-    if (typeof raw !== "string" || raw.length === 0) return new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
-    return copyFixedBlock(base64ToBytes(raw), GOOGLE_SHEETS_BLOCK_BYTES);
+  async readBlockAndControl(slot: PersistentFileSlot, blockIndex: number, controlRange: string): Promise<{ block: Uint8Array; controlValue: unknown }> {
+    const [control, block] = await this.client.batchGet([controlRange, this.blockRange(slot, blockIndex)]);
+    return {
+      block: decodeBlock(block?.values?.[0]?.[0]),
+      controlValue: control?.values?.[0]?.[0],
+    };
+  }
+
+  async writeMetadata(
+    sheetId: number,
+    slot: PersistentFileSlot,
+    path: string,
+    size: number,
+    leadingRequests: SpreadsheetRequest[] = [],
+  ): Promise<SpreadsheetBatchUpdateResult> {
+    const requests: SpreadsheetRequest[] = [...leadingRequests, this.metadataUpdateCells(sheetId, slot, path, size)];
+    return await this.client.spreadsheetBatchUpdate(requests);
+  }
+
+  async deleteMetadata(
+    sheetId: number,
+    slot: PersistentFileSlot,
+    path: string,
+    leadingRequests: SpreadsheetRequest[] = [],
+  ): Promise<SpreadsheetBatchUpdateResult> {
+    const requests: SpreadsheetRequest[] = [...leadingRequests, this.metadataUpdateCells(sheetId, slot, path, 0, true)];
+    return await this.client.spreadsheetBatchUpdate(requests);
   }
 
   async writeBlocksAndMetadata(
+    sheetId: number,
     slot: PersistentFileSlot,
     path: string,
     size: number,
     dirtyBlocks: ReadonlyMap<number, Uint8Array>,
     leadingRequests: SpreadsheetRequest[] = [],
   ): Promise<SpreadsheetBatchUpdateResult> {
-    const sheetId = await this.client.getSheetId(this.blockSheetName);
     const requests: SpreadsheetRequest[] = [...leadingRequests];
 
     requests.push(...this.blockUpdateRequests(sheetId, slot, dirtyBlocks));
@@ -108,16 +106,24 @@ export class GoogleSheetsBlockStore {
     return this.options.blockSheetName ?? DEFAULT_BLOCK_SHEET_NAME;
   }
 
-  private metadataUpdate(slot: PersistentFileSlot, path: string, size: number): SheetValueUpdate {
-    if (!Number.isSafeInteger(size) || size < 0) throw new RangeError(`invalid file size ${size}`);
+  private parseMetadata(slot: PersistentFileSlot, row: unknown[] | undefined): FileMetadata | null {
+    const rawSize = row?.[2];
+
+    if (rawSize === undefined || rawSize === null || rawSize === "") return null;
+
+    const size = Number(rawSize);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new Error(`Invalid size for Google Sheets VFS slot ${slot}: ${String(rawSize)}`);
+    }
 
     return {
-      range: this.metadataRange(slot),
-      values: [[slot, path, size]],
+      slot,
+      path: typeof row?.[1] === "string" ? row[1] : "",
+      size,
     };
   }
 
-  private metadataUpdateCells(sheetId: number, slot: PersistentFileSlot, path: string, size: number): SpreadsheetRequest {
+  private metadataUpdateCells(sheetId: number, slot: PersistentFileSlot, path: string, size: number, clearSize = false): SpreadsheetRequest {
     if (!Number.isSafeInteger(size) || size < 0) throw new RangeError(`invalid file size ${size}`);
 
     const row = BLOCK_METADATA_START_ROW + slot;
@@ -132,7 +138,7 @@ export class GoogleSheetsBlockStore {
         },
         rows: [
           {
-            values: [numberCell(slot), stringCell(path), numberCell(size)],
+            values: [numberCell(slot), stringCell(path), clearSize ? stringCell("") : numberCell(size)],
           },
         ],
         fields: "userEnteredValue",
@@ -213,6 +219,11 @@ export class GoogleSheetsBlockStore {
       col: 2 + (blockIndex % this.options.blocksPerStripe),
     };
   }
+}
+
+function decodeBlock(raw: unknown): Uint8Array {
+  if (typeof raw !== "string" || raw.length === 0) return new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
+  return copyFixedBlock(base64ToBytes(raw), GOOGLE_SHEETS_BLOCK_BYTES);
 }
 
 function stringCell(value: string): SheetCellData {
