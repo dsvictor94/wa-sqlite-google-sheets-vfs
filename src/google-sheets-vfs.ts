@@ -193,11 +193,12 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   async jDelete(filename: string, _syncDir: number): Promise<SqliteResult> {
     return await this.measured("jDelete", {}, VFS.SQLITE_IOERR_DELETE, async () => {
       await this.prepare();
-      const slot = slotForPath(normalizePath(filename), this.mainPath);
+      const path = normalizePath(filename);
+      const slot = slotForPath(path, this.mainPath);
       if (slot === null) return VFS.SQLITE_OK;
       const renewal = await this.createWriteBatchRenewal("jDelete");
       if (renewal === null) return VFS.SQLITE_BUSY;
-      const response = await this.store.deleteMetadata(renewal.dataSheetId, slot, filename, renewal.requests);
+      const response = await this.store.deleteMetadata(renewal.dataSheetId, slot, path, renewal.requests);
       this.lease.completeWriteBatchRenewal(response, renewal);
       this.clearOpenFilesForSlot(slot);
       return VFS.SQLITE_OK;
@@ -277,35 +278,21 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
 
   private async readVisibleBlock(file: VfsFileState, blockIndex: number): Promise<Uint8Array> {
     const dirty = file.dirtyBlocks.get(blockIndex);
-    if (dirty) { await this.ensureReadOwner(file); return dirty.slice(); }
-    if (blockIndex * GOOGLE_SHEETS_BLOCK_BYTES >= file.size) { await this.ensureReadOwner(file); return new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES); }
+    if (dirty) return dirty.slice();
+    if (blockIndex * GOOGLE_SHEETS_BLOCK_BYTES >= file.size) return new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
     if (file.slot === null) return file.tempBlocks.get(blockIndex)?.slice() ?? new Uint8Array(GOOGLE_SHEETS_BLOCK_BYTES);
     const cached = file.cache.get(blockIndex);
-    if (cached) { await this.ensureReadOwner(file); return cached; }
+    if (cached) return cached;
     const { block, controlValue } = await this.store.readBlockAndControl(file.slot, blockIndex, this.lease.controlRange);
-    if (!this.lease.applyOwnerCheck(controlValue)) return await this.retryReadAfterLostLease(file, blockIndex);
+    if (!this.lease.applyOwnerCheck(controlValue)) return this.failUnsafeSheetsRead();
     file.cache.set(blockIndex, block);
     return block;
   }
 
-  private async ensureReadOwner(file: VfsFileState): Promise<void> {
-    if (file.isPersistent && !(await this.lease.verifyCurrentOwner())) await this.resetPersistentStateAfterLostLease("readOwner");
-  }
-
-  private async retryReadAfterLostLease(file: VfsFileState, blockIndex: number): Promise<Uint8Array> {
-    await this.resetPersistentStateAfterLostLease("readBlock");
-    return await this.readVisibleBlock(file, blockIndex);
-  }
-
-  private async resetPersistentStateAfterLostLease(reason: string): Promise<void> {
+  private failUnsafeSheetsRead(): never {
     this.lease.clearLocalState();
-    for (const file of this.files.values()) if (file.isPersistent) file.clearVolatileState();
-    if (!(await this.acquireLease(reason, LOCK_SHARED))) throw new BusyError("Google Sheets VFS local lock state could not be reacquired");
-    for (const file of this.files.values()) {
-      if (file.slot === null) continue;
-      const metadata = await this.store.readMetadata(file.slot);
-      file.size = metadata?.size ?? 0;
-    }
+    this.clearPersistentVolatileState();
+    throw new Error("Google Sheets VFS read returned after the local lock was lost; transaction must be retried");
   }
 
   private async flush(file: VfsFileState): Promise<void> {
@@ -381,6 +368,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private hasOpenPersistentFiles(): boolean { for (const file of this.files.values()) if (file.isPersistent) return true; return false; }
   private clearOpenFilesForSlot(slot: PersistentFileSlot): void { for (const file of this.files.values()) if (file.slot === slot) file.clearVolatileState(); }
   private clearPersistentCaches(): void { for (const file of this.files.values()) if (file.isPersistent) file.cache.clear(); }
+  private clearPersistentVolatileState(): void { for (const file of this.files.values()) if (file.isPersistent) file.clearVolatileState(); }
   private clearAfterPersistentWriteError(): void { this.lease.clearLocalState(); this.clearPersistentCaches(); }
 
   private async measured(name: string, detail: GoogleSheetsVFSMetricDetail, fallback: SqliteResult, op: () => Promise<SqliteResult>): Promise<SqliteResult> {
