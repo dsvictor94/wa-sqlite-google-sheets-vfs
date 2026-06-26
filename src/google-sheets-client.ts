@@ -140,18 +140,23 @@ declare const gapi: {
   };
 };
 
-export async function createGoogleSheetsVfsSpreadsheet(title = `wa-sqlite VFS demo ${new Date().toISOString()}`): Promise<CreatedSpreadsheet> {
-  const response = await gapi.client.sheets.spreadsheets.create({
-    resource: {
-      properties: { title },
-      sheets: [
-        { properties: { title: DEFAULT_BLOCK_SHEET_NAME, gridProperties: { rowCount: BLOCK_SHEET_INITIAL_ROWS, columnCount: BLOCK_SHEET_INITIAL_COLUMNS } } },
-      ],
-    },
+export async function createGoogleSheetsVfsSpreadsheet(
+  title = `wa-sqlite VFS demo ${new Date().toISOString()}`,
+  metrics?: GoogleSheetsVFSMetrics,
+): Promise<CreatedSpreadsheet> {
+  const response = await measureGoogleSheetsRequest(metrics, "google.sheets.spreadsheets.create", { requests: 1, sheets: 1 }, async () => {
+    return await gapi.client.sheets.spreadsheets.create({
+      resource: {
+        properties: { title },
+        sheets: [
+          { properties: { title: DEFAULT_BLOCK_SHEET_NAME, gridProperties: { rowCount: BLOCK_SHEET_INITIAL_ROWS, columnCount: BLOCK_SHEET_INITIAL_COLUMNS } } },
+        ],
+      },
+    });
   });
 
   const spreadsheetId = response.result.spreadsheetId;
-  const client = new GoogleSdkSheetsClient(spreadsheetId);
+  const client = new GoogleSdkSheetsClient(spreadsheetId, metrics);
   await client.batchUpdate([
     {
       range: `${quoteSheetName(DEFAULT_BLOCK_SHEET_NAME)}!${LOCK_STATE_CELL}`,
@@ -282,24 +287,33 @@ export class GoogleSdkSheetsClient {
   }
 
   private async measureRequest<T>(name: string, detail: GoogleSheetsVFSMetricDetail, request: () => Promise<T>): Promise<T> {
-    const startedAt = nowMs();
-
-    try {
-      const result = await request();
-      this.emitMetric(name, true, nowMs() - startedAt, detail);
-      return result;
-    } catch (error) {
-      this.emitMetric(name, false, nowMs() - startedAt, detail);
-      throw error;
-    }
+    return await measureGoogleSheetsRequest(this.metrics, name, detail, request);
   }
+}
 
-  private emitMetric(name: string, ok: boolean, durationMs: number, detail: GoogleSheetsVFSMetricDetail): void {
-    try {
-      this.metrics?.onEvent?.({ name, ok, durationMs, detail });
-    } catch {
-      // Metrics must never affect Google API behavior.
-    }
+async function measureGoogleSheetsRequest<T>(
+  metrics: GoogleSheetsVFSMetrics | undefined,
+  name: string,
+  detail: GoogleSheetsVFSMetricDetail,
+  request: () => Promise<T>,
+): Promise<T> {
+  const startedAt = nowMs();
+
+  try {
+    const result = await request();
+    emitGoogleSheetsMetric(metrics, name, true, nowMs() - startedAt, detail);
+    return result;
+  } catch (error) {
+    emitGoogleSheetsMetric(metrics, name, false, nowMs() - startedAt, detail);
+    throw error;
+  }
+}
+
+function emitGoogleSheetsMetric(metrics: GoogleSheetsVFSMetrics | undefined, name: string, ok: boolean, durationMs: number, detail: GoogleSheetsVFSMetricDetail): void {
+  try {
+    metrics?.onEvent?.({ name, ok, durationMs, detail });
+  } catch {
+    // Metrics must never affect Google API behavior.
   }
 }
 
