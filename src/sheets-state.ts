@@ -365,8 +365,8 @@ export class GoogleSheetsLease {
   }
 
   private entry(letter: LockLetter, expiresAtSec: string): string { return `${letter}:${expiresAtSec}:${this.ownerKey};`; }
-  private statePrefix(dataSheetId: number): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:${dataSheetId}\|`; }
-  private anyStatePrefix(): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:[0-9]+\|`; }
+  private statePrefix(dataSheetId: number): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:${dataSheetId}\\|`; }
+  private anyStatePrefix(): string { return `${escapeRegex(LOCK_CELL_PREFIX)}D:[0-9]+\\|`; }
   private hasUsableLocalLease(): boolean { return this.expiresAtSec !== null && Date.now() < Number(this.expiresAtSec) * 1000; }
   private shouldRenewLocalLease(): boolean { return this.expiresAtSec !== null && Date.now() >= Number(this.expiresAtSec) * 1000 - this.renewBeforeExpiryMs; }
   private dropExpiredLocalLock(): void { if (this.localLock !== SQLITE_LOCK_NONE && !this.hasUsableLocalLease()) this.clearLocalState(); }
@@ -376,7 +376,7 @@ export class GoogleSheetsLease {
 function parseControlState(value: unknown): ControlState | null {
   if (typeof value !== "string" || !value.startsWith(LOCK_CELL_PREFIX)) return null;
 
-  const match = new RegExp(`^${escapeRegex(LOCK_CELL_PREFIX)}D:([0-9]+)\|(.*)$`).exec(value);
+  const match = new RegExp(`^${escapeRegex(LOCK_CELL_PREFIX)}D:([0-9]+)\\|(.*)$`).exec(value);
   if (match === null) return null;
 
   const dataSheetId = Number(match[1]);
