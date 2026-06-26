@@ -2,7 +2,7 @@
 
 SQLite storage on Google Sheets, powered by a custom wa-sqlite VFS.
 
-This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google JavaScript SDK and Google Identity Services, then stores SQLite file data as base64-encoded 4096-byte blocks in a Google Sheets tab.
+This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google JavaScript SDK and Google Identity Services, then stores SQLite file data as base64-encoded 4096-byte blocks in a stable `Data` sheet while lock/control state lives in a stable `Control` sheet.
 
 ## Demo
 
@@ -56,33 +56,6 @@ To use Picker in the browser demo:
 6. Open **IAM & Admin → Settings** and copy the project number. This is the Picker `appId`.
 7. Set the three `VITE_GOOGLE_*` variables above.
 
-The core Picker flow is:
-
-```ts
-const token = gapi.client.getToken()?.access_token;
-
-const view = new google.picker.DocsView(
-  google.picker.ViewId.SPREADSHEETS ?? google.picker.ViewId.DOCS,
-)
-  .setMimeTypes("application/vnd.google-apps.spreadsheet")
-  .setSelectFolderEnabled(false);
-
-new google.picker.PickerBuilder()
-  .addView(view)
-  .setDeveloperKey(import.meta.env.VITE_GOOGLE_API_KEY)
-  .setAppId(import.meta.env.VITE_GOOGLE_APP_ID)
-  .setOAuthToken(token)
-  .setCallback((data) => {
-    if (data[google.picker.Response.ACTION] !== google.picker.Action.PICKED) return;
-
-    const selected = data[google.picker.Response.DOCUMENTS][0];
-    const spreadsheetId = selected[google.picker.Document.ID];
-    // Use spreadsheetId with the Sheets API.
-  })
-  .build()
-  .setVisible(true);
-```
-
 ## Package status
 
 `wa-sqlite` is not published to npm, so this repo installs it directly from GitHub:
@@ -103,24 +76,46 @@ The upstream package includes both the built `dist/*` artifacts and the VFS help
 - Google Sheets SDK client wrapper.
 - Async wa-sqlite VFS implementation.
 - Full read/write/truncate/sync/file-size support.
-- Rollback-style lock state stored in the database sheet lock cell.
+- Stable `Control` sheet for lock/control state.
+- Stable `Data` sheet name for active SQLite block storage.
+- Recovery barrier lock protocol for expired exclusive locks.
 - Lazy block reads: it never downloads the full database.
 - In-memory handling for temporary SQLite files.
 
 ## Storage layout
 
-The default block tab is `__sqlite_blocks`.
+The VFS uses two stable sheets:
 
-Cell `A1` is reserved for lock state. New lock state uses the `LSV1|` prefix followed by zero or more entries in this form:
+- `Control` stores lock/control state in `Control!A1` and must keep fixed sheet id `100000`.
+- `Data` stores SQLite metadata and base64 block data. The first `Data` sheet id is `100001`.
+
+`Control` is never duplicated or deleted. The `Data` sheet name stays `Data`; recovery changes its underlying `sheetId` by duplicating the old sheet, deleting the old sheet id, and renaming the duplicate back to `Data`.
+
+`Control!A1` uses the `LSV2|` prefix and includes the active data sheet id:
 
 ```txt
-S:<expiresAtSec>:<owner>;
-R:<expiresAtSec>:<owner>;
-P:<expiresAtSec>:<owner>;
-X:<expiresAtSec>:<owner>;
+LSV2|D:<activeDataSheetId>|S:<expiresAtSec>:<owner>;R:<expiresAtSec>:<owner>;P:<expiresAtSec>:<owner>;X:<expiresAtSec>:<owner>;
 ```
 
-Rows 2-5 store file metadata. Block data starts at row 6. Each data cell stores one base64-encoded 4096-byte block.
+`B#`, `B##`, `B###`, etc. entries are recovery barriers. They block normal lock acquisition like `X`. The active data `sheetId` is the epoch, so no separate epoch field is stored.
+
+Rows 2-5 in `Data` store file metadata. Block data starts at row 6. Each data cell stores one base64-encoded 4096-byte block.
+
+## Lock recovery
+
+Every lock acquire first removes expired `S`, `R`, and `P` entries only. It never directly cleans expired `X` or `B...` entries. Instead, it tries to CAS an expired `X` or expired `B...` into a new barrier owned by the current client:
+
+```txt
+expired X    -> B#
+expired B#   -> B##
+expired B##  -> B###
+```
+
+Winning that CAS only grants recovery ownership, not the requested SQLite lock. The recovery owner then performs one `spreadsheets.batchUpdate` that duplicates the old `Data` sheet to the next data sheet id, deletes the old sheet id, renames the duplicate back to `Data`, and updates `Control!A1` to publish the originally requested lock on the new active data sheet id.
+
+Reads address the stable `Data` sheet name, but each persistent read also verifies that `Control!A1` still contains the current owner token. Block reads request `Control!A1` and the target `Data` range in the same `values.batchGet` when reading from Sheets.
+
+Writes use the active data `sheetId` returned by lock acquisition. Persistent flushes are emitted as a single `spreadsheets.batchUpdate`, so recovery cannot snapshot a partial flush. If a stale write targets a deleted old sheet id, the write fails, local state is cleared, and the VFS reacquires.
 
 ## Usage notes
 
@@ -146,8 +141,6 @@ BEGIN IMMEDIATE;
 -- related writes
 COMMIT;
 ```
-
-The lock helper stores one entry per open handle and uses SQLite rollback-style states: shared (`S`), reserved (`R`), pending (`P`), and exclusive (`X`). Each lock acquisition first removes expired entries in the same Sheets `spreadsheets.batchUpdate` call, and exclusive flushes can prepend a lease renewal request to the same batch as the block writes.
 
 Unlock does not flush pending main database changes; durable main database state is flushed by `xSync` outside an atomic write or by `SQLITE_FCNTL_COMMIT_ATOMIC_WRITE` during an atomic commit.
 
