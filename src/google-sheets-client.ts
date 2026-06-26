@@ -38,8 +38,29 @@ type GoogleSheetProperties = {
   };
 };
 
+type ExtendedValue = {
+  numberValue?: number;
+  stringValue?: string;
+  boolValue?: boolean;
+};
+
+type CellData = {
+  userEnteredValue?: ExtendedValue;
+  effectiveValue?: ExtendedValue;
+  formattedValue?: string;
+};
+
+type RowData = {
+  values?: CellData[];
+};
+
+type GridData = {
+  rowData?: RowData[];
+};
+
 type GoogleSheet = {
   properties?: GoogleSheetProperties;
+  data?: GridData[];
 };
 
 type SpreadsheetCreateResult = {
@@ -57,20 +78,6 @@ type GridRange = {
   endRowIndex: number;
   startColumnIndex: number;
   endColumnIndex: number;
-};
-
-type ExtendedValue = {
-  numberValue?: number;
-  stringValue?: string;
-  boolValue?: boolean;
-};
-
-type CellData = {
-  userEnteredValue?: ExtendedValue;
-};
-
-type RowData = {
-  values?: CellData[];
 };
 
 type UpdateCellsRequest = {
@@ -113,6 +120,12 @@ export type SpreadsheetRequest =
   | { updateCells: UpdateCellsRequest }
   | { updateSheetProperties: UpdateSheetPropertiesRequest };
 
+type SpreadsheetBatchUpdateOptions = {
+  includeSpreadsheetInResponse?: boolean;
+  responseRanges?: string[];
+  responseIncludeGridData?: boolean;
+};
+
 type FindReplaceResponse = {
   valuesChanged?: number;
   formulasChanged?: number;
@@ -126,6 +139,7 @@ export type SpreadsheetBatchUpdateResult = {
     duplicateSheet?: { properties?: GoogleSheetProperties };
     findReplace?: FindReplaceResponse;
   }>;
+  updatedSpreadsheet?: SpreadsheetGetResult;
 };
 
 type GoogleSheetsApi = {
@@ -142,7 +156,7 @@ type GoogleSheetsApi = {
     }): Promise<GoogleApiResponse<SpreadsheetGetResult>>;
     batchUpdate(request: {
       spreadsheetId: string;
-      resource: { requests: SpreadsheetRequest[] };
+      resource: { requests: SpreadsheetRequest[] } & SpreadsheetBatchUpdateOptions;
     }): Promise<GoogleApiResponse<SpreadsheetBatchUpdateResult>>;
     values: {
       batchGet(request: {
@@ -266,15 +280,19 @@ export class GoogleSdkSheetsClient {
     this.sheetIdsByTitle.delete(title);
   }
 
-  async spreadsheetBatchUpdate(requests: SpreadsheetRequest[]): Promise<SpreadsheetBatchUpdateResult> {
+  async spreadsheetBatchUpdate(requests: SpreadsheetRequest[], options: SpreadsheetBatchUpdateOptions = {}): Promise<SpreadsheetBatchUpdateResult> {
     if (!requests.length) return {};
 
-    const response = await this.measureRequest("google.sheets.spreadsheets.batchUpdate", { requests: 1, batchRequests: requests.length }, async () => {
-      return await gapi.client.sheets.spreadsheets.batchUpdate({
-        spreadsheetId: this.spreadsheetId,
-        resource: { requests },
-      });
-    });
+    const response = await this.measureRequest(
+      "google.sheets.spreadsheets.batchUpdate",
+      { requests: 1, batchRequests: requests.length, responseRanges: options.responseRanges?.length ?? 0 },
+      async () => {
+        return await gapi.client.sheets.spreadsheets.batchUpdate({
+          spreadsheetId: this.spreadsheetId,
+          resource: { requests, ...options },
+        });
+      },
+    );
 
     return response.result;
   }
