@@ -266,7 +266,7 @@ export class GoogleSheetsLease {
   private expiredRecoveryBarrierRequest(cutoffSec: string, barrierExpiresAtSec: string): SpreadsheetRequest {
     const expired = fixedWidthDecimalLeRegex(cutoffSec);
     return this.regexFindReplaceRequest(
-      `^(${this.anyStatePrefix()})(?:X|B#*):${expired}:${OWNER};$`,
+      `^(${this.anyStatePrefix()})(?:X|B):${expired}:${OWNER};$`,
       `$1B:${barrierExpiresAtSec}:${this.ownerKey};`,
       true,
     );
