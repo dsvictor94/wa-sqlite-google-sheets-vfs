@@ -16,10 +16,10 @@ import { quoteSheetName, sleep } from "./util.js";
 export type GoogleSheetsLeaseOptions = { databaseId: string; blockSheetName?: string; lockSheetName?: string; leaseMs?: number; lockTimeoutMs?: number; lockReleaseDelayMs?: number };
 export type GoogleSheetsWriteBatchRenewal = { requests: SpreadsheetRequest[]; replyIndex: number; expiresAtSec: string; dataSheetId: number };
 
+export type GoogleSheetsWriteBatchRenewalResult = "renewed" | "stale-but-written";
 type LockLetter = "S" | "R" | "P" | "X";
 type ControlEntry = {
   letter: LockLetter | "B";
-  hashes: string;
   expiresAtSec: string;
   owner: string;
 };
@@ -29,7 +29,6 @@ type ControlState = {
 };
 type RecoveryCandidate = {
   oldDataSheetId: number;
-  newHashes: string;
 };
 
 type CellData = { userEnteredValue: { stringValue?: string; numberValue?: number; boolValue?: boolean } };
@@ -39,7 +38,7 @@ const MAX_RETRY_DELAY_MS = 250;
 const EXP = "[0-9]{10}";
 const OWNER = "[^;]+";
 const NORMAL_ENTRY = `[SRPX]:${EXP}:${OWNER};`;
-const BARRIER_ENTRY = `B#*:${EXP}:${OWNER};`;
+const BARRIER_ENTRY = `B:${EXP}:${OWNER};`;
 const ANY_ENTRY = `(?:${NORMAL_ENTRY}|${BARRIER_ENTRY})`;
 const SQLITE_LOCK_NONE = SQLite.SQLITE_LOCK_NONE;
 const SQLITE_LOCK_SHARED = SQLite.SQLITE_LOCK_SHARED;
@@ -87,8 +86,7 @@ export class GoogleSheetsLease {
       const recoveryCutoffSec = fixedWidthUnixSec(Date.now());
       const requests: SpreadsheetRequest[] = [this.cleanupExpiredNonExclusiveRequest()];
       const recoveryStartIndex = requests.length;
-      requests.push(this.expiredExclusiveRecoveryRequest(recoveryCutoffSec, expiresAtSec));
-      requests.push(this.expiredBarrierRecoveryRequest(recoveryCutoffSec, expiresAtSec));
+      requests.push(this.expiredRecoveryBarrierRequest(recoveryCutoffSec, expiresAtSec));
       const normalStartIndex = requests.length;
       requests.push(...this.acquireRequests(target, expiresAtSec));
 
@@ -100,7 +98,7 @@ export class GoogleSheetsLease {
       const state = this.controlStateFromBatchUpdate(response);
       this.activeDataSheetId = state.dataSheetId;
 
-      if (changed(response, recoveryStartIndex) || changed(response, recoveryStartIndex + 1)) {
+      if (changed(response, recoveryStartIndex)) {
         const recovery = this.recoveryCandidateFromBarrierState(state);
         if (recovery !== null && await this.completeRecoveryAcquire(target, recovery)) return true;
       } else if (this.applyAcquireResponse(target, expiresAtSec, normalStartIndex, response, state)) {
@@ -152,7 +150,7 @@ export class GoogleSheetsLease {
     if (this.hasReservedLock) return true;
     const response = await this.client.spreadsheetBatchUpdate([
       this.cleanupExpiredNonExclusiveRequest(),
-      this.regexFindReplaceRequest(`^(${this.anyStatePrefix()}(?:${ANY_ENTRY})*(?:[RPX]:${EXP}:${OWNER};|B#*:${EXP}:${OWNER};)(?:${ANY_ENTRY})*)$`, "$1!", true),
+      this.regexFindReplaceRequest(`^(${this.anyStatePrefix()}(?:${ANY_ENTRY})*(?:[RPX]:${EXP}:${OWNER};|B:${EXP}:${OWNER};)(?:${ANY_ENTRY})*)$`, "$1!", true),
       this.regexFindReplaceRequest("!", "", false),
     ]);
     return changed(response, 1);
@@ -172,14 +170,15 @@ export class GoogleSheetsLease {
     };
   }
 
-  completeWriteBatchRenewal(response: SpreadsheetBatchUpdateResult, renewal: GoogleSheetsWriteBatchRenewal): void {
+  completeWriteBatchRenewal(response: SpreadsheetBatchUpdateResult, renewal: GoogleSheetsWriteBatchRenewal): GoogleSheetsWriteBatchRenewalResult {
     if (!changed(response, renewal.replyIndex)) {
       this.clearLocalState();
-      throw new Error("Google Sheets VFS exclusive lock renewal failed during persistent write batch");
+      return "stale-but-written";
     }
     this.localLock = SQLITE_LOCK_EXCLUSIVE;
     this.expiresAtSec = renewal.expiresAtSec;
     this.activeDataSheetId = renewal.dataSheetId;
+    return "renewed";
   }
 
   applyOwnerCheck(controlValue: unknown): boolean {
@@ -260,24 +259,15 @@ export class GoogleSheetsLease {
   private recoveryCandidateFromBarrierState(state: ControlState): RecoveryCandidate | null {
     if (state.entries.length !== 1) return null;
     const [entry] = state.entries;
-    if (entry.letter !== "B" || entry.owner !== this.ownerKey || entry.hashes.length === 0) return null;
-    return { oldDataSheetId: state.dataSheetId, newHashes: entry.hashes };
+    if (entry.letter !== "B" || entry.owner !== this.ownerKey) return null;
+    return { oldDataSheetId: state.dataSheetId };
   }
 
-  private expiredExclusiveRecoveryRequest(cutoffSec: string, barrierExpiresAtSec: string): SpreadsheetRequest {
+  private expiredRecoveryBarrierRequest(cutoffSec: string, barrierExpiresAtSec: string): SpreadsheetRequest {
     const expired = fixedWidthDecimalLeRegex(cutoffSec);
     return this.regexFindReplaceRequest(
-      `^(${this.anyStatePrefix()})X:${expired}:${OWNER};$`,
-      `$1B#:${barrierExpiresAtSec}:${this.ownerKey};`,
-      true,
-    );
-  }
-
-  private expiredBarrierRecoveryRequest(cutoffSec: string, barrierExpiresAtSec: string): SpreadsheetRequest {
-    const expired = fixedWidthDecimalLeRegex(cutoffSec);
-    return this.regexFindReplaceRequest(
-      `^(${this.anyStatePrefix()})B(#+):${expired}:${OWNER};$`,
-      `$1B$2#:${barrierExpiresAtSec}:${this.ownerKey};`,
+      `^(${this.anyStatePrefix()})(?:X|B):${expired}:${OWNER};$`,
+      `$1B:${barrierExpiresAtSec}:${this.ownerKey};`,
       true,
     );
   }
@@ -286,11 +276,8 @@ export class GoogleSheetsLease {
     const targetLetter = lockLetter(target);
     if (targetLetter === null) throw new Error(`Invalid SQLite recovery target ${target}`);
 
-    const hashCount = recovery.newHashes.length;
-    if (hashCount <= 0) throw new Error("Google Sheets VFS recovery barrier must contain at least one #");
-
     const oldDataSheetId = recovery.oldDataSheetId;
-    const newDataSheetId = oldDataSheetId + hashCount;
+    const newDataSheetId = oldDataSheetId + 1;
     const expiresAtSec = this.nextExpiresAtSec();
     const tempSheetName = `__sqlite_recovery_${newDataSheetId}`;
 
@@ -374,15 +361,14 @@ function parseControlState(value: unknown): ControlState | null {
 
   const entriesRaw = match[2];
   const entries: ControlEntry[] = [];
-  const entryRegex = /(S|R|P|X|B#*):([0-9]{10}):([^;]+);/g;
+  const entryRegex = /(S|R|P|X|B):([0-9]{10}):([^;]+);/g;
   let offset = 0;
   let entryMatch: RegExpExecArray | null;
   while ((entryMatch = entryRegex.exec(entriesRaw)) !== null) {
     if (entryMatch.index !== offset) return null;
     const rawLetter = entryMatch[1];
-    const letter = rawLetter[0] as LockLetter | "B";
-    const hashes = rawLetter.startsWith("B") ? rawLetter.slice(1) : "";
-    entries.push({ letter, hashes, expiresAtSec: entryMatch[2], owner: entryMatch[3] });
+    const letter = rawLetter as LockLetter | "B";
+    entries.push({ letter, expiresAtSec: entryMatch[2], owner: entryMatch[3] });
     offset = entryRegex.lastIndex;
   }
 

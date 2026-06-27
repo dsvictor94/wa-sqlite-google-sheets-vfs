@@ -199,7 +199,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       const renewal = await this.createWriteBatchRenewal("jDelete");
       if (renewal === null) return VFS.SQLITE_BUSY;
       const response = await this.store.deleteMetadata(renewal.dataSheetId, slot, path, renewal.requests);
-      this.lease.completeWriteBatchRenewal(response, renewal);
+      const renewalResult = this.lease.completeWriteBatchRenewal(response, renewal);
+      if (renewalResult === "stale-but-written") this.clearAfterStaleSuccessfulWrite();
       this.clearOpenFilesForSlot(slot);
       return VFS.SQLITE_OK;
     });
@@ -241,7 +242,8 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
     const renewal = await this.createWriteBatchRenewal("openPersistentFile");
     if (renewal === null) throw new BusyError("Could not acquire Google Sheets VFS exclusive lock while opening file");
     const response = await this.store.writeMetadata(renewal.dataSheetId, slot, path, 0, renewal.requests);
-    this.lease.completeWriteBatchRenewal(response, renewal);
+    const renewalResult = this.lease.completeWriteBatchRenewal(response, renewal);
+    if (renewalResult === "stale-but-written") this.clearAfterStaleSuccessfulWrite();
     return 0;
   }
 
@@ -302,8 +304,9 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
       const renewal = await this.createWriteBatchRenewal("flush");
       if (renewal === null) throw new BusyError("Could not acquire Google Sheets VFS exclusive lock while flushing file");
       const response = await this.store.writeBlocksAndMetadata(renewal.dataSheetId, file.slot, file.path, file.size, file.dirtyBlocks, renewal.requests);
-      this.lease.completeWriteBatchRenewal(response, renewal);
+      const renewalResult = this.lease.completeWriteBatchRenewal(response, renewal);
       file.finishFlush();
+      if (renewalResult === "stale-but-written") this.clearAfterStaleSuccessfulWrite();
     } catch (error) {
       this.clearAfterPersistentWriteError();
       throw error;
@@ -370,6 +373,7 @@ export class GoogleSheetsSQLiteVFS extends FacadeVFS {
   private clearPersistentCaches(): void { for (const file of this.files.values()) if (file.isPersistent) file.cache.clear(); }
   private clearPersistentVolatileState(): void { for (const file of this.files.values()) if (file.isPersistent) file.clearVolatileState(); }
   private clearAfterPersistentWriteError(): void { this.lease.clearLocalState(); this.clearPersistentCaches(); }
+  private clearAfterStaleSuccessfulWrite(): void { this.lease.clearLocalState(); this.clearPersistentCaches(); }
 
   private async measured(name: string, detail: GoogleSheetsVFSMetricDetail, fallback: SqliteResult, op: () => Promise<SqliteResult>): Promise<SqliteResult> {
     const startedAt = nowMs();

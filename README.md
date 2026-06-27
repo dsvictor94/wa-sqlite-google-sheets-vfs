@@ -1,74 +1,8 @@
 # wa-sqlite-google-sheets-vfs
 
-SQLite storage on Google Sheets, powered by a custom wa-sqlite VFS.
+SQLite storage on Google Sheets, powered by a custom `wa-sqlite` VFS.
 
 This package is a browser-oriented async VFS for `wa-sqlite`. It uses the Google JavaScript SDK and Google Identity Services, then stores SQLite file data as base64-encoded 4096-byte blocks in a stable `Data` sheet while lock/control state lives in a stable `Control` sheet.
-
-## Demo
-
-This repo is also a GitHub Pages demo app. The demo credentials are configured at build time through required Vite environment variables, so forks can replace the Google Cloud project without editing TypeScript source code.
-
-The demo connects to Google using only this OAuth scope:
-
-```txt
-https://www.googleapis.com/auth/drive.file
-```
-
-With `drive.file`, the app can read and write only the Google Drive files the user creates with the app or explicitly selects with Google Picker. For an existing spreadsheet, use the Picker button so Google grants this app access to that specific spreadsheet. Pasting a URL or ID is only for reopening a spreadsheet that was already created or selected with this app.
-
-The Pages workflow builds on pull requests and deploys on pushes to `main`.
-
-## Demo configuration
-
-Set these required variables before building the demo:
-
-```bash
-VITE_GOOGLE_CLIENT_ID="<oauth-web-client-id>"
-VITE_GOOGLE_API_KEY="<picker-developer-key>"
-VITE_GOOGLE_APP_ID="<google-cloud-project-number>"
-```
-
-The demo fails during startup if any of these variables are missing.
-
-`VITE_GOOGLE_APP_ID` is the Google Cloud project number used by Google Picker. It is required and must be set explicitly. Do not use the Google Cloud project ID string.
-
-For local development, create `demo/.env.local` or pass the variables in your shell before running Vite. For GitHub Pages, set repository variables under **Settings → Secrets and variables → Actions → Variables**:
-
-- `VITE_GOOGLE_CLIENT_ID`
-- `VITE_GOOGLE_API_KEY`
-- `VITE_GOOGLE_APP_ID`
-
-The workflow passes those variables into the Vite build. They are embedded in the published JavaScript bundle, which is expected for browser OAuth client IDs, Picker app IDs, and browser API keys. Restrict the API key in Google Cloud to the GitHub Pages origin and only the APIs needed by Picker.
-
-## Google Picker setup
-
-To use Picker in the browser demo:
-
-1. In Google Cloud, create or select a project.
-2. Enable the Google Sheets API and the Google Picker API / Drive API entries required by Picker in that project.
-3. Create an OAuth 2.0 Web client ID.
-4. Add authorized JavaScript origins for where the demo runs, for example:
-   - `http://localhost:5173`
-   - your GitHub Pages origin
-5. Create an API key and restrict it as much as possible:
-   - Application restriction: your web origins only.
-   - API restriction: only the Picker/Drive APIs required by Picker.
-6. Open **IAM & Admin → Settings** and copy the project number. This is the Picker `appId`.
-7. Set the three `VITE_GOOGLE_*` variables above.
-
-## Package status
-
-`wa-sqlite` is not published to npm, so this repo installs it directly from GitHub:
-
-```json
-{
-  "dependencies": {
-    "wa-sqlite": "github:rhashimoto/wa-sqlite#master"
-  }
-}
-```
-
-The upstream package includes both the built `dist/*` artifacts and the VFS helper files under `src/`, which this implementation imports.
 
 ## Features
 
@@ -81,6 +15,16 @@ The upstream package includes both the built `dist/*` artifacts and the VFS help
 - Recovery barrier lock protocol for expired exclusive locks.
 - Lazy block reads: it never downloads the full database.
 - In-memory handling for temporary SQLite files.
+
+## Access model
+
+The demo uses the Drive file scope. With that scope, the app can read and write only Google Drive files the user creates with the app or explicitly selects with Google Picker. For an existing spreadsheet, use Picker so Google grants this app access to that specific spreadsheet. Pasting a URL or ID is only for reopening a spreadsheet that was already created or selected with this app.
+
+The GitHub Pages demo expects the Google OAuth client id, Picker developer key, and Google Cloud project number to be provided at build time through the demo environment. These browser credentials are embedded in the published JavaScript bundle, which is expected for browser OAuth client ids, Picker app ids, and browser API keys. Restrict the API key in Google Cloud to the demo origin and to the APIs required by Picker.
+
+## Package status
+
+`wa-sqlite` is not published to npm, so this repo installs it directly from GitHub. The upstream package includes both the built `dist/*` artifacts and the VFS helper files under `src/`, which this implementation imports.
 
 ## Storage layout
 
@@ -97,25 +41,28 @@ The VFS uses two stable sheets:
 LSV2|D:<activeDataSheetId>|S:<expiresAtSec>:<owner>;R:<expiresAtSec>:<owner>;P:<expiresAtSec>:<owner>;X:<expiresAtSec>:<owner>;
 ```
 
-`B#`, `B##`, `B###`, etc. entries are recovery barriers. They block normal lock acquisition like `X`. The active data `sheetId` is the epoch, so no separate epoch field is stored.
+A `B:<expiresAtSec>:<owner>;` entry is a recovery barrier. It blocks normal lock acquisition like `X`. The active data `sheetId` is the epoch, so no separate epoch field is stored.
 
 Rows 2-5 in `Data` store file metadata. Block data starts at row 6. Each data cell stores one base64-encoded 4096-byte block.
 
 ## Lock recovery
 
-Every lock acquire first removes expired `S`, `R`, and `P` entries only. It never directly cleans expired `X` or `B...` entries. Instead, it tries to CAS an expired `X` or expired `B...` into a new barrier owned by the current client:
+Every lock acquire first removes expired `S`, `R`, and `P` entries only. It never directly cleans expired `X` entries. Instead, it uses a single recovery barrier find-and-replace that can claim either an expired `X` or an expired `B`:
 
 ```txt
-expired X    -> B#
-expired B#   -> B##
-expired B##  -> B###
+expired X -> B
+expired B -> B
 ```
 
-Winning that CAS only grants recovery ownership, not the requested SQLite lock. The recovery owner then performs one `spreadsheets.batchUpdate` that duplicates the old `Data` sheet to the next data sheet id, deletes the old sheet id, renames the duplicate back to `Data`, and updates `Control!A1` to publish the originally requested lock on the new active data sheet id.
+The `B` entry is a recovery reservation, not the final write fence. It blocks normal lock acquisition while recovery is in progress and records which client is currently attempting recovery.
 
-Reads address the stable `Data` sheet name, but each persistent read also verifies that `Control!A1` still contains the current owner token. Block reads request `Control!A1` and the target `Data` range in the same `values.batchGet` when reading from Sheets.
+After acquiring `B`, the recovery owner performs one `spreadsheets.batchUpdate` that duplicates the old `Data` sheet to `oldDataSheetId + 1`, deletes the old sheet id, renames the duplicate back to `Data`, and updates `Control!A1` to publish the originally requested lock on the new active data sheet id. The old sheet id is the single-use recovery fence: if two clients race the recovery move, at most one batch can succeed because the old sheet id can only be deleted once.
 
-Writes use the active data `sheetId` returned by lock acquisition. Persistent flushes are emitted as a single `spreadsheets.batchUpdate`, so recovery cannot snapshot a partial flush. If a stale write targets a deleted old sheet id, the write fails, local state is cleared, and the VFS reacquires.
+A stale exclusive writer may still send a persistent write batch after another client has claimed `B` but before recovery duplicates the old sheet. That is allowed. Persistent writes are emitted as a single `spreadsheets.batchUpdate`, so recovery either snapshots the whole transaction or none of it. If the stale write batch reaches Sheets after recovery has deleted the old sheet id, the batch fails because it targets a deleted sheet id.
+
+Reads address the stable `Data` sheet name, but each persistent cache miss also verifies that `Control!A1` still contains the current owner token. Block reads request `Control!A1` and the target `Data` range in the same `values.batchGet` when reading from Sheets.
+
+Writes use the active data `sheetId` returned by lock acquisition. Persistent flushes are emitted as a single `spreadsheets.batchUpdate`, so recovery cannot snapshot a partial flush. If the flush batch succeeds but the leading lock-renewal find-and-replace changed zero occurrences, the write is still treated as durable because the data updates in the same successful batch were applied. The VFS then clears its local lease state and persistent block caches before the next operation reacquires.
 
 ## Usage notes
 
@@ -146,46 +93,12 @@ Unlock does not flush pending main database changes; durable main database state
 
 ## Browser usage
 
-```ts
-import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite-async.mjs";
-import * as SQLite from "wa-sqlite";
-import {
-  DRIVE_FILE_SCOPE,
-  GoogleBrowserAuth,
-  GoogleSheetsSQLiteVFS,
-  ensureGoogleSheetsVfsTabs,
-} from "wa-sqlite-google-sheets-vfs";
+The usual setup flow is:
 
-const auth = new GoogleBrowserAuth({
-  clientId: "<your-oauth-web-client-id>",
-  scopes: DRIVE_FILE_SCOPE,
-});
+1. Initialize and authorize Google auth in the browser.
+2. Create or select a Google spreadsheet that the app is allowed to access.
+3. Call `ensureGoogleSheetsVfsTabs(spreadsheetId)`.
+4. Create a `GoogleSheetsSQLiteVFS` instance for that spreadsheet.
+5. Register the VFS with `wa-sqlite` and open the database with this VFS name.
 
-await auth.init();
-await auth.authorize();
-
-const spreadsheetId = "<spreadsheet-id-selected-with-picker-or-created-by-this-app>";
-await ensureGoogleSheetsVfsTabs(spreadsheetId);
-
-const module = await SQLiteESMFactory();
-const sqlite3 = SQLite.Factory(module);
-
-const vfs = await GoogleSheetsSQLiteVFS.create("google-sheets", module, {
-  spreadsheetId,
-  databaseId: "main-db",
-});
-
-sqlite3.vfs_register(vfs, true);
-
-const db = await sqlite3.open_v2(
-  "/main.db",
-  SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE,
-  "google-sheets",
-);
-
-await sqlite3.exec(db, `
-  PRAGMA journal_mode=DELETE;
-  PRAGMA synchronous=FULL;
-  CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-`);
-```
+Use rollback journal mode and `synchronous=FULL` for durable commits.
